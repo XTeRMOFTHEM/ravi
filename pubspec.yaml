@@ -1,0 +1,56 @@
+name: ravi
+description: "RAVI — Connect, Chat, Play. A fast, smooth messenger."
+publish_to: 'none'
+version: 1.0.9+9
+
+environment:
+  sdk: ^3.13.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  http: ^1.5.0
+  socket_io_client: ^3.1.2
+  cached_network_image: ^3.4.1
+  path_provider: ^2.1.5
+  shared_preferences: ^2.5.3
+  image_picker: ^1.2.0
+  flutter_svg: ^2.2.0
+  video_player: ^2.14.1
+  audioplayers: ^6.8.1
+  record: ^7.1.1
+  image_cropper: ^12.2.1
+  file_picker: ^13.1.0
+  emoji_picker_flutter: ^4.5.4
+  saver_gallery: ^5.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/images/icon_main.png"
+  adaptive_icon_background: "#00278A"
+  adaptive_icon_foreground: "assets/images/icon_foreground.png"
+  min_sdk_android: 23
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
+    - assets/backgrounds/
+    - assets/pro_star.png
+  fonts:
+    - family: Vazirmatn
+      fonts:
+        - asset: assets/fonts/Vazirmatn.ttf
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter.ttf
