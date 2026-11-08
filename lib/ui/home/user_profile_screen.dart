@@ -2,6 +2,7 @@ import 'dart:ui';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart' as ip;
 
 import '../../core/api_service.dart';
@@ -195,49 +196,53 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                         ],
                       ),
 
-                      // ================= header =================
+                      // ================= header (v1.1.0 — CENTERED) =================
                       Transform.translate(
-                        offset: const Offset(0, -56),
+                        offset: const Offset(0, -50),
                         child: Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 16),
                           child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                            crossAxisAlignment: CrossAxisAlignment.center,
                             children: [
-                              Row(
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  // ---- avatar + real frame (2×, web-like) ----
-                                  GestureDetector(
-                                    onTap: avatar.isNotEmpty
-                                        ? () => openMediaViewer(context,
-                                            fileUrl:
-                                                ApiService.I.avatarUrl(avatar),
-                                            title: _u)
-                                        : null,
-                                    child: FrameAvatar(
-                                      name: name,
-                                      avatarPath: avatar,
-                                      frameUrl: hasFrame ? frameUrl : '',
-                                      size: 104,
-                                    ),
+                              // ---- avatar + real frame (2×, web-like) ----
+                              GestureDetector(
+                                onTap: avatar.isNotEmpty
+                                    ? () => openMediaViewer(context,
+                                        fileUrl:
+                                            ApiService.I.avatarUrl(avatar),
+                                        title: _u)
+                                    : null,
+                                child: Container(
+                                  padding: const EdgeInsets.all(3),
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: p.bg,
+                                    boxShadow: const [
+                                      BoxShadow(
+                                          color: Color(0x2414283C),
+                                          blurRadius: 16,
+                                          offset: Offset(0, 6)),
+                                    ],
                                   ),
-                                  SizedBox(width: hasFrame ? 34 : 8),
-                                  const Spacer(),
-                                ],
+                                  child: FrameAvatar(
+                                    name: name,
+                                    avatarPath: avatar,
+                                    frameUrl: hasFrame ? frameUrl : '',
+                                    size: 92,
+                                    glow: false,
+                                  ),
+                                ),
                               ),
-                              const SizedBox(height: 8),
+                              const SizedBox(height: 11),
 
-                              // ---- name row (color fixed for LIGHT mode) ----
-                              // v1.0.9 — the Pro star is on the NAME (like the
-                              // blue check); the separate badges column is gone
-                              // (its breathing glow pushed the layout around).
-                              Row(children: [
+                              // ---- centered name + badges ----
+                              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                                 Flexible(
                                   child: Text(name,
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
-                                          fontSize: 21,
+                                          fontSize: 20,
                                           fontWeight: FontWeight.w800,
                                           color: p.pfName)),
                                 ),
@@ -248,40 +253,70 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                 ],
                                 if (isPro) ...[
                                   const SizedBox(width: 5),
-                                  const ProStarBadge(size: 20),
+                                  // v1.5.0 — لمس = تگ پرمیوم + توضیح قابلیت‌ها
+                                  PremiumProfileBadge(size: 20),
                                 ],
                               ]),
                               const SizedBox(height: 2),
-                              Text('$_u',
-                                  textDirection: TextDirection.ltr,
-                                  style: TextStyle(
-                                      fontSize: 13.5,
-                                      fontWeight: FontWeight.w600,
-                                      color: p.pfHandle)),
-                              const SizedBox(height: 5),
-                              Text(
-                                  '$followers ${AppState.I.str.followers}',
-                                  style: TextStyle(
-                                      fontSize: 12.5,
-                                      fontWeight: FontWeight.w600,
-                                      color: p.text2)),
-                              const SizedBox(height: 8),
-                              // meta chips: joined
-                              Row(children: [
-                                Icon(Icons.calendar_today_rounded,
-                                    size: 12, color: p.text3),
-                                const SizedBox(width: 5),
-                                Flexible(
-                                  child: Text(
-                                      createdAt.isEmpty
-                                          ? '—'
-                                          : createdAt,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                          fontSize: 11.5, color: p.text3)),
+                              // v1.1.1 — @handle is a REAL tappable chip now:
+                              // ' @username ' + copy icon, one tap copies it.
+                              GestureDetector(
+                                onTap: () async {
+                                  await Clipboard.setData(
+                                      ClipboardData(text: '@$_u'));
+                                  if (!context.mounted) return;
+                                  showGlassToast(context,
+                                      AppState.I.str.copied,
+                                      icon: Icons.copy_rounded);
+                                  HapticFeedback.selectionClick();
+                                },
+                                behavior: HitTestBehavior.opaque,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 10, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: p.bgSoft,
+                                    borderRadius: BorderRadius.circular(999),
+                                    border: Border.all(
+                                        color: p.border,
+                                        width: .8),
+                                  ),
+                                  child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text('@$_u',
+                                            textDirection: TextDirection.ltr,
+                                            style: TextStyle(
+                                                fontSize: 12.5,
+                                                fontWeight: FontWeight.w700,
+                                                letterSpacing: .2,
+                                                color: p.text2)),
+                                        const SizedBox(width: 5),
+                                        Icon(Icons.copy_rounded,
+                                            size: 12, color: p.text3),
+                                      ]),
                                 ),
-                              ]),
+                              ),
+                              const SizedBox(height: 6),
+                              // meta chips: joined date centered
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.calendar_today_rounded,
+                                      size: 12, color: p.text3),
+                                  const SizedBox(width: 5),
+                                  Flexible(
+                                    child: Text(
+                                        createdAt.isEmpty
+                                            ? '—'
+                                            : createdAt,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                            fontSize: 11.5, color: p.text3)),
+                                  ),
+                                ],
+                              ),
                             ],
                           ),
                         ),
@@ -982,6 +1017,8 @@ class _CustomizeProfileSheetState extends State<CustomizeProfileSheet> {
   String _frame = '';
   String _theme = 'default';
   String _card = 'default';
+  // v1.5.0 — بانک قاب‌های تازه از سرور (API /api/frames)
+  List<Map<String, dynamic>> _serverFrames = const [];
 
   @override
   void initState() {
@@ -991,8 +1028,12 @@ class _CustomizeProfileSheetState extends State<CustomizeProfileSheet> {
 
   Future<void> _load() async {
     final me = ApiService.I.cachedUsername;
+    final fr = await ApiService.I.frames();
     final r = await ApiService.I.userProfile(me);
     if (!mounted) return;
+    if (fr.ok && fr.data != null && fr.data!.isNotEmpty) {
+      _serverFrames = fr.data!;
+    }
     if (r.ok && r.data != null) {
       final d = r.data!;
       final frameUrl = '${d['avatar_frame_url'] ?? ''}';
@@ -1002,6 +1043,14 @@ class _CustomizeProfileSheetState extends State<CustomizeProfileSheet> {
           if (frameUrl.contains('frame_${f.$1}.png')) {
             _frame = f.$1;
             break;
+          }
+        }
+        if (_frame.isEmpty && _serverFrames.isNotEmpty) {
+          for (final f in _serverFrames) {
+            if (frameUrl.contains('frame_${f['key']}.png')) {
+              _frame = '${f['key']}';
+              break;
+            }
           }
         }
       }
@@ -1124,18 +1173,16 @@ class _CustomizeProfileSheetState extends State<CustomizeProfileSheet> {
 
                       _sectionTitle(p, s.avatarFrameTitle, locked: !_isPro),
                       const SizedBox(height: 8),
-                      SizedBox(
-                        height: 108,
-                        child: ListView(
-                          scrollDirection: Axis.horizontal,
-                          physics: const BouncingScrollPhysics(),
-                          children: [
-                            _frameCell(p, '', s.noFrame, Icons.not_interested),
-                            for (final f in ProPresets.avatarFrames)
-                              _frameCell(p, f.$1, f.$2, null),
-                          ],
-                        ),
-                      ),
+                      // v1.5.0 — پیش‌نمایش «زنده» روی بنر خود کاربر: با انتخاب
+                      // هر قاب، همین کارت بالا همان لحظه عوض می‌شود.
+                      _frameLivePreview(p),
+                      const SizedBox(height: 14),
+                      // v1.5.0 — لیستِ کاملِ همه‌ی قاب‌ها در گرید (از سرور هم
+                      // قاب‌های تازه گرفته می‌شود؛ قاب جدید = بدون آپدیت اپ)
+                      _framesGrid(p),
+                      const SizedBox(height: 12),
+                      // v1.5.0 — بخش «بیشتر» قاب‌ها
+                      _frameMoreChip(p),
                       const SizedBox(height: 16),
 
                       _sectionTitle(p, s.themeTitle, locked: !_isPro),
@@ -1195,6 +1242,177 @@ class _CustomizeProfileSheetState extends State<CustomizeProfileSheet> {
                     ],
                   ),
           ),
+        ],
+      ),
+    );
+  }
+
+  // ================= v1.5.0 — قاب‌ها: پیش‌نمایش زنده + گرید + بخش بیشتر =================
+
+  /// کارت پیش‌نمایش زنده: بنر خود کاربر (کاور واقعی یا تم) + آواتار با قابِ
+  /// انتخابیِ همین لحظه + اسم — دقیقاً مثل چیزی که پروفایل نشان می‌دهد.
+  Widget _frameLivePreview(Palette p) {
+    final s = AppState.I.str;
+    final avatar = '${_prof?['avatar'] ?? ''}';
+    final name = ('${_prof?['name'] ?? ''}').trim().isNotEmpty
+        ? '${_prof?['name']}'
+        : ApiService.I.cachedUsername;
+    final hasCover = _prof?['has_cover'] == true;
+    final coverUrl = '${_prof?['profile_cover'] ?? ''}';
+    final themeKey = ProPresets.cssToKey['${_prof?['cover_theme_css'] ?? ''}'] ??
+        (hasCover ? '' : 'default');
+    final frameUrl = _frame.isEmpty
+        ? ''
+        : ProPresets.frameUrl(_frame);
+
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: p.borderSoft),
+        boxShadow: const [
+          BoxShadow(color: Color(0x1E14283C), blurRadius: 18, offset: Offset(0, 8)),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // ---- بنر خود فرد (کاور یا تم) ----
+            Container(
+              height: 108,
+              decoration: BoxDecoration(
+                color: p.pfCard,
+                gradient: (themeKey.isNotEmpty && themeKey != 'default')
+                    ? LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: ProPresets.profileThemes[themeKey] ??
+                            ProPresets.profileThemes['default']!,
+                      )
+                    : null,
+              ),
+              child: hasCover && coverUrl.isNotEmpty
+                  ? CachedNetworkImage(
+                      imageUrl: ApiService.I.absoluteUrl(coverUrl),
+                      fit: BoxFit.cover,
+                      httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                    )
+                  : null,
+            ),
+            Transform.translate(
+              offset: const Offset(0, -34),
+              child: Column(
+                children: [
+                  Center(
+                    child: Container(
+                      padding: const EdgeInsets.all(3),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: p.bg,
+                        boxShadow: const [
+                          BoxShadow(
+                              color: Color(0x2414283C),
+                              blurRadius: 14,
+                              offset: Offset(0, 5)),
+                        ],
+                      ),
+                      child: FrameAvatar(
+                        name: name,
+                        avatarPath: avatar,
+                        frameUrl: frameUrl,
+                        size: 74,
+                        glow: false,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        color: p.text),
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.auto_awesome_rounded,
+                          size: 11, color: Color(0xFF8F7BFF)),
+                      const SizedBox(width: 4),
+                      Text(s.framePreviewTitle,
+                          style: TextStyle(
+                              fontSize: 9.5, color: p.text3)),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// همه‌ی قاب‌ها در گرید: اول بدون‌قاب، بعد بانک سرور (تازه) و در نبودِ
+  /// پاسخِ سرور، لیست محلی ProPresets.
+  Widget _framesGrid(Palette p) {
+    final s = AppState.I.str;
+    final cells = <(String, String, IconData?)>[
+      ('', s.noFrame, Icons.not_interested),
+    ];
+    if (_serverFrames.isNotEmpty) {
+      for (final f in _serverFrames) {
+        cells.add(('${f['key'] ?? ''}', '${f['name'] ?? ''}', null));
+      }
+    } else {
+      for (final f in ProPresets.avatarFrames) {
+        cells.add((f.$1, f.$2, null));
+      }
+    }
+    return GridView.count(
+      crossAxisCount: 4,
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      mainAxisSpacing: 10,
+      crossAxisSpacing: 8,
+      childAspectRatio: 0.86,
+      padding: EdgeInsets.zero,
+      children: [
+        for (final c in cells)
+          _frameCell(p, c.$1, c.$2, c.$3),
+      ],
+    );
+  }
+
+  /// بخش «بیشتر» قاب‌ها — چیپ طلاییِ «قاب‌های بیشتر به‌زودی…»
+  Widget _frameMoreChip(Palette p) {
+    final s = AppState.I.str;
+    return Container(
+      height: 40,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF8F7BFF), Color(0xFF7AA7FF)],
+        ),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.auto_awesome_rounded,
+              size: 14, color: Colors.white),
+          const SizedBox(width: 7),
+          Text(s.frameMoreComing,
+              style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  color: Colors.white)),
         ],
       ),
     );

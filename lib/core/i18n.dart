@@ -172,6 +172,18 @@ class S {
   String get themeLight => _t('Light', 'روشن');
   String get themeDark => _t('Dark', 'تاریک');
   String get themeSystem => _t('System', 'سیستم');
+  // v1.4.0 — منوی شناور صفحه اصلی + سیو مسیج + چندحسابی
+  String get savedMessages => _t('Saved Messages', 'پیام‌های ذخیره‌شده');
+  String get myProfile => _t('My Profile', 'پروفایل من');
+  String get accounts => _t('Accounts', 'حساب‌ها');
+  String get addAccount => _t('Add account', 'افزودن حساب');
+  String get switchAccount => _t('Switch account', 'تعویض حساب');
+  String get accountLimitReached =>
+      _t('Account limit reached', 'سقف تعداد حساب‌ها پر است');
+  String get accountLimitProHint =>
+      _t('Pro users can add up to 5 accounts', 'کاربران پرو تا ۵ حساب می‌توانند اضافه کنند');
+  String get accountLimitNormalHint =>
+      _t('Regular users can add up to 3 accounts', 'کاربران معمولی تا ۳ حساب می‌توانند اضافه کنند');
   String get accentTitle => _t('Accent color', 'رنگ تأکیدی');
   String get accentSub => _t('Color of buttons & highlights', 'رنگ دکمه‌ها و بخش‌های برجسته');
   String get chatBg => _t('Chat background', 'پس‌زمینه چت');
@@ -252,6 +264,36 @@ class S {
   String get audioFile => _t('Audio', 'صدا');
   String get unsupportedFile => _t('Format not supported (jpg png gif webp mp4 webm mp3 ogg m4a)',
       'فرمت مجاز نیست (jpg png gif webp mp4 webm mp3 ogg m4a)');
+
+  // ---- v1.5.0 — media download like Telegram ----
+  String get updating => _t('Updating…', 'در حال به‌روزرسانی…');
+  String get downloadingMedia => _t('Downloading…', 'در حال دانلود…');
+  String get fileSavedToDownloads => _t('Saved in Downloads/RAVI', 'در Downloads/RAVI ذخیره شد');
+  String get downloadFile => _t('Download', 'دانلود');
+  String get fileNameTitle => _t('File', 'فایل');
+  String get frameMoreComing => _t('More frames coming soon', 'قاب‌های بیشتر به‌زودی');
+  String get framePreviewTitle => _t('Live preview on your banner', 'پیش‌نمایش زنده روی بنر خودت');
+  String get premiumTagTitle => 'PREMIUM';
+  String get premiumTagDesc => _t(
+      'RAVI Premium unlocks everything special:',
+      'رَوی پرمیوم همه‌ی امکانات ویژه را باز می‌کند:');
+  List<String> get premiumFeatures => [
+    lang.isFa
+        ? 'قاب‌های اختصاصی پروفایل (باروک، پروانه، گوتیک و …)'
+        : 'Exclusive profile frames (Baroque, Butterfly, Gothic…)',
+    lang.isFa
+        ? 'تم و کاور اختصاصی پروفایل'
+        : 'Custom profile themes & covers',
+    lang.isFa
+        ? '۵ حساب همزمان + سوییچ سریع'
+        : '5 simultaneous accounts + fast switching',
+    lang.isFa
+        ? 'لوگوی پرمیوم کنار اسمت همه‌جا'
+        : 'Premium badge next to your name everywhere',
+    lang.isFa
+        ? 'امکانات بیشتر به‌زودی…'
+        : 'More features coming soon…',
+  ];
 
   // voice
   String get holdToRecord => _t('Hold to record', 'نگه دارید تا ضبط شود');
@@ -484,4 +526,99 @@ class S {
   String get joinGroupBtn => _t('Join', 'عضویت');
   String get linkLabel => _t('Link', 'لینک');
   String get downloadPct => _t('Downloading', 'در حال دانلود');
+
+  // ================= v1.1.0 — chat & media upgrades =================
+  String get messagePinned => _t('Message pinned', 'پیام سنجاق شد');
+  String get messageUnpinned => _t('Message unpinned', 'سنجاق پیام برداشته شد');
+  String get editRoomProfile => _t('Edit group profile', 'ویرایش پروفایل گروه');
+  String get changePhotoHint => _t('Tap the photo to change it', 'برای تغییر، روی عکس بزنید');
+  String get roomNameLabel => _t('Group name', 'نام گروه');
+  String get roomProfileSaved => _t('Group profile updated', 'پروفایل گروه به‌روزرسانی شد');
+  String get pinnedMessage => _t('Pinned message', 'پیام سنجاق‌شده');
+  String get pinMessage => _t('Pin', 'سنجاق کردن');
+  String get loadingReply => _t('Loading replied message…', 'در حال بارگیری پیام اصلی…');
+  String get replyNotFound => _t('The replied message could not be found', 'پیام اصلی پیدا نشد');
+  String get callsComingSoon => _t('Calls are coming soon', 'تماس‌ها به‌زودی اضافه می‌شوند');
+  String get blockUser => _t('Block user', 'مسدود کردن کاربر');
+
+  // attach / gallery
+  String get galleryTitle => _t('Gallery', 'نگارخانه');
+  String sendCount(int n) => _t('Send ($n)', 'ارسال ($n)');
+  String albumCount(int n) => _t('$n items', '$n مورد');
+  String get galleryHintMulti =>
+      _t('Tap to select — you can pick several photos', 'برای انتخاب بزن — می‌توانی چند عکس انتخاب کنی');
+  String gallerySelectedHint(int n) =>
+      _t('$n selected · they will be sent together as an album',
+          '$n مورد انتخاب شد · با هم در یک آلبوم ارسال می‌شوند');
+  String get galleryPermission =>
+      _t('Ravi needs access to your photos & videos to show the in-app gallery',
+          'برای نمایش نگارخانه داخل برنامه، اجازه دسترسی به عکس‌ها و ویدیوها لازم است');
+  String get openSettings => _t('Open settings', 'باز کردن تنظیمات');
+  String get galleryEmpty => _t('No media on this device', 'رسانه‌ای روی دستگاه نیست');
+  String get editPhotoTitle => _t('Edit photo', 'ویرایش عکس');
+  String get drawOn => _t('Draw', 'نقاشی');
+  String get resetEdit => _t('Reset', 'ریست');
+  String get sendAsIs => _t('Send as is', 'بدون تغییر بفرست');
+  String get nextStep => _t('Next', 'بعدی');
+  String get captionHint => _t('Add a caption…', 'توضیح بنویس…');
+
+  // ================= v1.1.0 — Data & Storage =================
+  String get dataStorageTitle => _t('Data and Storage', 'داده و حافظه');
+  String get dataStorageSub => _t('Network usage, cache and media', 'مصرف اینترنت، کش و رسانه‌ها');
+  String get networkUsage => _t('Network usage', 'مصرف اینترنت');
+  String get sessionData => _t('This session', 'این نشست');
+  String get sentLabel => _t('Sent', 'ارسال شده');
+  String get receivedLabel => _t('Received', 'دریافت شده');
+  String get storageUsage => _t('Storage usage', 'مصرف حافظه');
+  String get cacheLabel => _t('Cache', 'حافظه موقت');
+  String get photosLabel => _t('Photos', 'عکس‌ها');
+  String get videosLabel => _t('Videos', 'ویدیوها');
+  String get gifsLabel => _t('GIFs', 'گیف‌ها');
+  String get musicLabel => _t('Music', 'موزیک');
+  String get filesLabel => _t('Files', 'فایل‌ها');
+  String get avatarsLabel => _t('Profile photos', 'عکس‌های پروفایل');
+  String get clearCache => _t('Clear cache', 'پاک کردن کش');
+  String get clearAll => _t('Clear all', 'پاک کردن همه');
+  String get cacheClearedToast => _t('Cache cleared', 'حافظه موقت پاک شد');
+  String get manageMedia => _t('Manage media', 'مدیریت رسانه‌ها');
+  String get manageMediaSub => _t('Browse and delete downloaded media', 'مرور و حذف رسانه‌های دانلودشده');
+  String get mediaEmpty => _t('No downloaded media yet', 'هنوز رسانه‌ای ذخیره نشده');
+  String get autoLoadMedia => _t('Auto-load media', 'بارگیری خودکار رسانه');
+  String get autoLoadMediaSub =>
+      _t('Preload photos & GIFs ahead of time', 'پیش‌بارگیری عکس‌ها و گیف‌ها');
+  String get saveToGallery => _t('Save to phone gallery', 'ذخیره در گالری گوشی');
+  String get mediaDeletedToast => _t('Removed', 'حذف شد');
+  String get resetLabel => _t('Reset', 'ریست');
+  String get keepMedia => _t('Keep media', 'نگه داشتن رسانه‌ها');
+
+  // chats list
+  String get deleteChat => _t('Delete chat', 'حذف چت');
+  String get deleteChatConfirm =>
+      _t('This chat and its cached messages will be removed from this device',
+          'این چت و پیام‌های ذخیره‌شده‌اش از این دستگاه حذف می‌شوند');
+  String get chatDeletedToast => _t('Chat deleted', 'چت حذف شد');
+  String youPrefix(String text) => _t('You: $text', 'شما: $text');
+  String get pinnedLimit5 => _t('You can pin up to 5 chats', 'حداکثر ۵ چت را می‌توانی سنجاق کنی');
+
+  // group events (thin glass center toasts)
+  String userJoinedToast(String name) => _t('$name joined the group', '$name به گروه پیوست');
+  String userLeftToast(String name) => _t('$name left the group', '$name گروه را ترک کرد');
+  String userKickedToast(String name) => _t('$name was removed', '$name حذف شد');
+  String userBannedToast(String name) => _t('$name was banned', '$name بن شد');
+  String get memberAddedToast => _t('Member added', 'عضو اضافه شد');
+
+  // global search
+  String get globalSearchHint => _t('Search users, groups, channels…', 'جستجوی کاربران، گروه‌ها، کانال‌ها…');
+  // v1.2.0 — topbar search pill hint
+  String get searchHint => _t('Search', 'جستجو');
+  String get globalSearchHintLong =>
+      _t('Type a username or name — public groups, channels and people show up here.',
+          'یک نام کاربری یا اسم بنویس — گروه‌های عمومی، کانال‌ها و افراد همین‌جا ظاهر می‌شوند.');
+  String get globalRooms => _t('Public rooms', 'اتاق‌های عمومی');
+  String get globalNoResults =>
+      _t('Nothing found. Try the exact @username.', 'چیزی پیدا نشد. @نام کاربری دقیق را امتحان کن.');
+  String get globalTipUsers => _t('@username → opens the person', '@username → پروفایل آن شخص باز می‌شود');
+  String get globalTipRooms => _t('public room @username → join panel', '@username عمومی → پنل عضویت');
+  String get globalTipChats => _t('your chats filter instantly as you type', 'چت‌های خودت همان لحظه فیلتر می‌شوند');
+  String membersCountShort(int n) => _t('$n members', '$n عضو');
 }

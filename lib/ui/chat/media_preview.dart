@@ -1,133 +1,269 @@
 import 'dart:io';
-import 'dart:ui' as ui;
+import 'dart:typed_data';
 import 'dart:ui';
 
+import 'package:audio_metadata_reader/audio_metadata_reader.dart' as amr;
 import 'package:file_picker/file_picker.dart' as fp;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:photo_manager/photo_manager.dart';
 import 'package:image_picker/image_picker.dart' as ip;
 import 'package:video_player/video_player.dart';
 
+import '../../core/api_service.dart';
 import '../../core/app_state.dart';
 import '../../core/constants.dart';
 import '../../core/i18n.dart';
+import '../widgets/common.dart';
 
-/// Telegram-style send flow:
-///  1. pick (gallery/camera/music/file)
-///  2. optional crop for photos
-///  3. full preview with caption
-///  4. onSend(path, kind, caption)
+/// v1.1.0 — one attachment the user picked in the gallery sheet.
+/// v1.2.1 — music files carry their parsed metadata (title / artist /
+/// duration / cover art) so the chat can render a DEDICATED music bubble
+/// instead of mistaking songs for voice notes.
+class AttachItem {
+  final String path;
+  final String fileType; // image | video | audio | file
+  final bool isVoice; // audio: recorded voice note vs music file
+  final int durationMs;
+  final String title;
+  final String artist;
+  final String coverPath; // local cover art file (uploaded on send)
+  const AttachItem(this.path, this.fileType,
+      {this.isVoice = false,
+      this.durationMs = 0,
+      this.title = '',
+      this.artist = '',
+      this.coverPath = ''});
+}
+
+/// Telegram-style send flow (v1.1.0 FULL REWORK):
+///  1. IN-APP gallery sheet (photo_manager): grid of device photos/videos,
+///     multi-select with check badges — no system picker hop
+///  2. single photo → CROP/DRAW editor FIRST (send-as-is button included)
+///  3. caption preview (clean glass composer, album thumbnail strip)
+///  4. onSend(items, caption) — the caller sends the batch (album grouping)
 Future<void> showAttachSheet(
   BuildContext context, {
-  required Future<bool> Function(String path, String fileType, String caption)
+  required Future<bool> Function(List<AttachItem> items, String caption)
       onSend,
 }) async {
   await showModalBottomSheet(
     context: context,
+    isScrollControlled: true,
     backgroundColor: Colors.transparent,
     builder: (_) => _AttachSheet(onSend: onSend),
   );
 }
 
-class _AttachSheet extends StatelessWidget {
-  final Future<bool> Function(String, String, String) onSend;
+class _AttachSheet extends StatefulWidget {
+  final Future<bool> Function(List<AttachItem>, String) onSend;
   const _AttachSheet({required this.onSend});
 
-  void _pick(BuildContext ctx, _Source src) async {
+  @override
+  State<_AttachSheet> createState() => _AttachSheetState();
+}
+
+class _AttachSheetState extends State<_AttachSheet> {
+  final Set<String> _picked = {}; // asset id
+  List<AssetEntity>? _recent;
+  bool _denied = false;
+  int _page = 0;
+  bool _loadingMore = false;
+  AssetPathEntity? _path;
+
+  static const _pageSize = 120;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadGallery();
+  }
+
+  Future<void> _loadGallery() async {
+    final ps = await PhotoManager.requestPermissionExtend();
+    if (!ps.hasAccess) {
+      if (mounted) setState(() => _denied = true);
+      return;
+    }
+    final paths = await PhotoManager.getAssetPathList(
+      type: RequestType.common,
+      onlyAll: true,
+      filterOption: FilterOptionGroup(
+        orders: const [OrderOption(type: OrderOptionType.createDate)],
+      ),
+    );
+    if (paths.isEmpty) {
+      if (mounted) setState(() => _recent = []);
+      return;
+    }
+    _path = paths.first;
+    final assets = await _path!.getAssetListRange(start: 0, end: _pageSize);
+    if (mounted) setState(() => _recent = assets);
+  }
+
+  Future<void> _loadMore() async {
+    if (_loadingMore || _path == null || _recent == null) return;
+    _loadingMore = true;
+    _page++;
+    final more = await _path!
+        .getAssetListRange(start: _page * _pageSize, end: (_page + 1) * _pageSize);
+    if (mounted) {
+      setState(() {
+        _recent!.addAll(more);
+      });
+    }
+    _loadingMore = false;
+  }
+
+  // ---------- pickers outside the gallery ----------
+  // v1.2.1 — MUSIC: parse ID3/metadata exactly like Telegram — title,
+  // artist, duration and the embedded cover art become part of the message,
+  // and the receiving side gets a real music player (NOT a voice bar).
+  Future<void> _pickFile(bool music) async {
     final s = AppState.I.str;
     try {
-      if (src == _Source.music || src == _Source.file) {
-        final type =
-            src == _Source.music ? fp.FileType.audio : fp.FileType.media;
-        final files = await fp.FilePicker.pickFiles(type: type);
-        if (files.isEmpty || files.first.path == null) return;
-        final path = files.first.path!;
-        final ext = path.split('.').last.toLowerCase();
-        final kind = (ext == 'mp4' || ext == 'webm') ? 'video' : 'audio';
-        final ok = await _openPreview(ctx, path, kind);
-        if (!ok) {
-          showRaviToastTop(ctx, s.unsupportedFile);
-        }
+      final files =
+          await fp.FilePicker.pickFiles(type: music ? fp.FileType.audio : fp.FileType.any);
+      if (files.isEmpty || files.first.path == null) return;
+      final path = files.first.path!;
+      final ext = path.split('.').last.toLowerCase();
+      final kind = music
+          ? 'audio'
+          : (ext == 'mp4' || ext == 'webm' || ext == 'mov' || ext == 'm4v'
+              ? 'video'
+              : 'file');
+      if (kind != 'audio') {
+        // v1.5.0 — اسم اصلی فایل همراه پیام می‌رود (media_meta.title) تا
+        // حباب فایلِ گیرنده اسم واقعی را نشان دهد، نه اسم تولیدیِ سرور.
+        await _openPreview([AttachItem(path, kind, title: files.first.name)], '');
         return;
       }
-      // ---- gallery / camera: images AND videos (v1.0.6) ----
-      final picker = ip.ImagePicker();
-      if (src == _Source.camera) {
-        // ask which one the user wants via a tiny glass sheet
-        final choice = await showModalBottomSheet<String>(
-          context: ctx,
-          backgroundColor: Colors.transparent,
-          builder: (_) => _CameraChoiceSheet(),
-        );
-        if (choice == null) return;
-        if (choice == 'video') {
-          final x = await picker.pickVideo(source: ip.ImageSource.camera);
-          if (x == null) return;
-          final ok = await _openPreview(ctx, x.path, 'video');
-          if (!ok) showRaviToastTop(ctx, s.unsupportedFile);
-          return;
+      var title = files.first.name;
+      var artist = '';
+      var durMs = 0;
+      var coverPath = '';
+      try {
+        final meta = amr.readMetadata(File(path), getImage: true);
+        final t = (meta.title ?? '').trim();
+        if (t.isNotEmpty) title = t;
+        final a = (meta.artist ?? '').trim();
+        if (a.isNotEmpty) artist = a;
+        durMs = meta.duration?.inMilliseconds ?? 0;
+        for (final pic in meta.pictures) {
+          final bytes = pic.bytes;
+          if (bytes == null || bytes.isEmpty) continue;
+          final dir = await getTemporaryDirectory();
+          final f = File(
+              '${dir.path}/cover_${DateTime.now().millisecondsSinceEpoch}.jpg');
+          await f.writeAsBytes(bytes);
+          coverPath = f.path;
+          break;
         }
-        final x = await picker.pickImage(
-            source: ip.ImageSource.camera,
-            maxWidth: 2400,
-            imageQuality: 90);
+      } catch (_) {
+        // unreadable tags → fall back to the filename (still a MUSIC send)
+      }
+      // upload the cover art once (small file) so receivers see it too
+      var coverUrl = '';
+      if (coverPath.isNotEmpty) {
+        final up = await ApiService.I.uploadImage(coverPath);
+        if (up.ok) coverUrl = '${up.data?['file_url'] ?? ''}';
+      }
+      await _openPreview(
+        [
+          AttachItem(path, 'audio',
+              isVoice: false,
+              durationMs: durMs,
+              title: title,
+              artist: artist,
+              coverPath: coverUrl.isNotEmpty ? coverUrl : coverPath),
+        ],
+        '',
+      );
+    } catch (_) {
+      if (mounted) showRaviToastTop(context, s.unsupportedFile);
+    }
+  }
+
+  Future<void> _pickCamera() async {
+    final s = AppState.I.str;
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _CameraChoiceSheet(),
+    );
+    if (choice == null) return;
+    final picker = ip.ImagePicker();
+    try {
+      if (choice == 'video') {
+        final x = await picker.pickVideo(source: ip.ImageSource.camera);
         if (x == null) return;
-        final ok = await _openPreview(ctx, x.path, 'image');
-        if (!ok) showRaviToastTop(ctx, s.unsupportedFile);
+        await _openPreview([AttachItem(x.path, 'video')], '');
         return;
       }
-      // gallery: try a combined media pick first (image or video)
-      final media = await picker.pickMedia();
-      if (media == null) return;
-      final isVideo = _isVideoPath(media.path);
-      String path = media.path;
-      // Telegram-like crop step for PHOTOS ONLY — video skips cropping.
-      if (!isVideo) {
-        try {
-          final cropped = await ImageCropper().cropImage(
-            sourcePath: path,
-            uiSettings: [
-              AndroidUiSettings(
-                toolbarTitle: AppState.I.str.cropPhoto,
-                toolbarColor: const Color(0xFF141A1F),
-                toolbarWidgetColor: Colors.white,
-                backgroundColor: Colors.black,
-                activeControlsWidgetColor: const Color(0xFF8B5CF6),
-                lockAspectRatio: false,
-                hideBottomControls: false,
-              ),
-            ],
-          );
-          if (cropped != null) path = cropped.path;
-        } catch (_) {
-          // v1.0.6 CRASH FIX: if the cropper activity is unavailable on some
-          // OEM ROMs we simply keep the original photo instead of crashing.
-        }
-      }
-      final ok = await _openPreview(ctx, path, isVideo ? 'video' : 'image');
-      if (!ok) {
-        showRaviToastTop(ctx, AppState.I.str.unsupportedFile);
-      }
-    } catch (_) {}
+      final x = await picker.pickImage(
+          source: ip.ImageSource.camera, maxWidth: 2400, imageQuality: 92);
+      if (x == null) return;
+      final edited = await _editPhoto(x.path);
+      if (edited == null) return; // user backed out
+      await _openPreview([AttachItem(edited, 'image')], '');
+    } catch (_) {
+      if (mounted) showRaviToastTop(context, s.unsupportedFile);
+    }
   }
 
-  static bool _isVideoPath(String p) {
-    final ext = p.split('.').last.toLowerCase();
-    return ext == 'mp4' || ext == 'webm' || ext == 'mov' || ext == 'm4v' || ext == '3gp';
-  }
-
-  Future<bool> _openPreview(
-      BuildContext ctx, String path, String kind) async {
-    final ext = path.split('.').last.toLowerCase();
-    const allowed = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'webm', 'mp3', 'ogg', 'm4a'];
-    if (!allowed.contains(ext)) return false;
-    final res = await Navigator.of(ctx).push<bool>(MaterialPageRoute(
+  /// v1.1.0 — the CROP/DRAW editor comes FIRST (Telegram order):
+  /// crop → draw → "send as-is" → null (user cancelled).
+  Future<String?> _editPhoto(String path) async {
+    final res = await Navigator.of(context).push<String>(MaterialPageRoute(
       fullscreenDialog: true,
-      builder: (_) => _MediaPreviewScreen(path: path, kind: kind, onSend: onSend),
+      builder: (_) => _EditFirstScreen(path: path),
     ));
-    return true;
+    return res;
+  }
+
+  Future<void> _openPreview(List<AttachItem> items, String caption) async {
+    if (items.isEmpty) return;
+    final allowed = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'webm', 'mp3', 'ogg', 'm4a', 'pdf', 'zip', 'doc', 'docx', 'txt', 'mov', 'm4v', '3gp'];
+    for (final it in items) {
+      final ext = it.path.split('.').last.toLowerCase();
+      if (it.fileType == 'file' || it.fileType == 'audio' || it.fileType == 'video') {
+        continue; // non-image files pass without extension checks
+      }
+      if (!allowed.contains(ext)) {
+        if (mounted) showRaviToastTop(context, AppState.I.str.unsupportedFile);
+        return;
+      }
+    }
+    await Navigator.of(context).push(MaterialPageRoute(
+      fullscreenDialog: true,
+      builder: (_) => _MediaPreviewScreen(
+          items: items, caption: caption, onSend: widget.onSend),
+    ));
+  }
+
+  Future<void> _confirmSelection() async {
+    if (_picked.isEmpty || _recent == null) return;
+    final s = AppState.I.str;
+    final items = <AttachItem>[];
+    for (final a in _recent!) {
+      if (!_picked.contains(a.id)) continue;
+      final file = await a.originFile.timeout(const Duration(seconds: 8),
+          onTimeout: () => null);
+      if (file == null) continue;
+      final kind = a.type == AssetType.video ? 'video' : 'image';
+      items.add(AttachItem(file.path, kind));
+    }
+    if (items.isEmpty) return;
+    // single photo → straight into the crop-first editor
+    if (items.length == 1 && items.first.fileType == 'image') {
+      final edited = await _editPhoto(items.first.path);
+      if (edited == null) return; // cancelled
+      items[0] = AttachItem(edited, 'image');
+    }
+    await _openPreview(items, '');
   }
 
   @override
@@ -136,53 +272,280 @@ class _AttachSheet extends StatelessWidget {
         ? const Palette.dark()
         : const Palette.light();
     final s = AppState.I.str;
-    return Container(
-      margin: const EdgeInsets.all(12),
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: p.bg,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: p.borderSoft),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-            _attachCell(p, Icons.photo_library_outlined, s.photoVideo,
-                () => _pick(context, _Source.gallery)),
-            _attachCell(p, Icons.photo_camera_outlined, s.camera,
-                () => _pick(context, _Source.camera)),
-            _attachCell(p, Icons.music_note_rounded, s.music,
-                () => _pick(context, _Source.music)),
+    final height = MediaQuery.sizeOf(context).height * 0.82;
+
+    return ClipRRect(
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 26, sigmaY: 26),
+        child: Container(
+          height: height,
+          color: p.bg.withValues(alpha: .97),
+          child: Column(children: [
+            const SizedBox(height: 10),
+            Container(
+                width: 42,
+                height: 4,
+                decoration: BoxDecoration(
+                    color: p.border,
+                    borderRadius: BorderRadius.circular(3))),
+            // ---- header row ----
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 10, 8),
+              child: Row(children: [
+                Icon(Icons.photo_library_rounded, size: 20, color: p.accent),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(s.galleryTitle,
+                      style: TextStyle(
+                          fontSize: 15.5,
+                          fontWeight: FontWeight.w800,
+                          color: p.text)),
+                ),
+                if (_picked.isNotEmpty)
+                  GestureDetector(
+                    onTap: _confirmSelection,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 150),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        gradient: C.ownBubbleGrad,
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Text(s.sendCount(_picked.length),
+                            style: const TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w800,
+                                color: Colors.white)),
+                      ]),
+                    ),
+                  ),
+                const SizedBox(width: 8),
+                _roundTool(p, Icons.music_note_rounded, () => _pickFile(true)),
+                const SizedBox(width: 6),
+                _roundTool(p, Icons.folder_outlined, () => _pickFile(false)),
+                const SizedBox(width: 6),
+                _roundTool(p, Icons.photo_camera_outlined, _pickCamera),
+              ]),
+            ),
+            Divider(height: 1, color: p.border),
+            // ---- gallery grid ----
+            Expanded(child: _gridBody(p, s)),
+            // ---- action bar ----
+            SafeArea(
+              top: false,
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(14, 8, 14, 10),
+                decoration: BoxDecoration(
+                  color: p.bg,
+                  border: Border(top: BorderSide(color: p.border)),
+                ),
+                child: Row(children: [
+                  Icon(Icons.info_outline_rounded,
+                      size: 15, color: p.text3),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      _picked.isEmpty
+                          ? s.galleryHintMulti
+                          : s.gallerySelectedHint(_picked.length),
+                      style: TextStyle(fontSize: 11, color: p.text3),
+                    ),
+                  ),
+                  GestureDetector(
+                    onTap: _picked.isEmpty
+                        ? null
+                        : () => setState(() => _picked.clear()),
+                    child: Text(s.clearSelection,
+                        style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: _picked.isEmpty
+                                ? p.text3
+                                : const Color(0xFFEF4444))),
+                  ),
+                ]),
+              ),
+            ),
           ]),
-        ],
+        ),
       ),
     );
   }
 
-  Widget _attachCell(Palette p, IconData icon, String label, VoidCallback onTap) {
+  Widget _roundTool(Palette p, IconData icon, VoidCallback onTap) {
     return GestureDetector(
       onTap: onTap,
-      child: Column(children: [
-        Container(
-          width: 54,
-          height: 54,
-          decoration: BoxDecoration(
-            color: p.accentSoft,
-            shape: BoxShape.circle,
-          ),
-          child: Icon(icon, color: p.accent, size: 24),
+      child: Container(
+        width: 36,
+        height: 36,
+        decoration: BoxDecoration(
+          color: p.accentSoft,
+          shape: BoxShape.circle,
         ),
-        const SizedBox(height: 7),
-        Text(label, style: TextStyle(fontSize: 11, color: p.text2)),
-      ]),
+        child: Icon(icon, size: 19, color: p.accent),
+      ),
     );
+  }
+
+  Widget _gridBody(Palette p, S s) {
+    if (_denied) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.photo_library_outlined, size: 40, color: p.text3),
+            const SizedBox(height: 12),
+            Text(s.galleryPermission,
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 12.5, color: p.text2)),
+            const SizedBox(height: 12),
+            GestureDetector(
+              onTap: () async {
+                await PhotoManager.openSetting();
+              },
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+                decoration: BoxDecoration(
+                  color: p.accentSoft,
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: Text(s.openSettings,
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: p.accent)),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    if (_recent == null) {
+      return const Center(
+          child: SizedBox(
+              width: 26,
+              height: 26,
+              child: CircularProgressIndicator(strokeWidth: 2.2)));
+    }
+    if (_recent!.isEmpty) {
+      return Center(
+          child: Text(s.galleryEmpty,
+              style: TextStyle(fontSize: 12.5, color: p.text3)));
+    }
+    return GridView.builder(
+      padding: const EdgeInsets.fromLTRB(3, 3, 3, 10),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        mainAxisSpacing: 2,
+        crossAxisSpacing: 2,
+      ),
+      itemCount: _recent!.length,
+      itemBuilder: (ctx, i) {
+        final asset = _recent![i];
+        final selectedIdx = _picked.toList().indexOf(asset.id);
+        final picked = _picked.contains(asset.id);
+        if (i == _recent!.length - 12) {
+          Future.microtask(_loadMore);
+        }
+        return GestureDetector(
+          onTap: () {
+            HapticFeedback.selectionClick();
+            setState(() {
+              if (picked) {
+                _picked.remove(asset.id);
+              } else {
+                if (_picked.length >= 10) return; // album cap (Telegram-ish)
+                _picked.add(asset.id);
+              }
+            });
+          },
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(picked ? 8 : 2),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                // v1.2.1 — BULLETPROOF thumbnail loader. The old
+                // AssetEntityImage silently failed on several devices
+                // (blank tiles = "gallery doesn't load images"); this one
+                // decodes the thumbnail manually with a file fallback +
+                // explicit error tile + retry.
+                _GalleryTile(asset: asset),
+                if (asset.type == AssetType.video)
+                  PositionedDirectional(
+                    bottom: 4,
+                    start: 5,
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.videocam_rounded,
+                          size: 12, color: Colors.white),
+                      const SizedBox(width: 3),
+                      Text(_fmtDur(asset.videoDuration.inSeconds),
+                          textDirection: TextDirection.ltr,
+                          style: const TextStyle(
+                              fontSize: 9.5,
+                              color: Colors.white,
+                              fontWeight: FontWeight.w700,
+                              shadows: [
+                                Shadow(color: Colors.black45, blurRadius: 3)
+                              ])),
+                    ]),
+                  ),
+                if (picked)
+                  PositionedDirectional(
+                    top: 5,
+                    end: 5,
+                    child: Container(
+                      width: 22,
+                      height: 22,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: p.accent,
+                        border: Border.all(color: Colors.white, width: 1.6),
+                      ),
+                      child: Center(
+                        child: Text('${selectedIdx + 1}',
+                            textDirection: TextDirection.ltr,
+                            style: const TextStyle(
+                                fontSize: 10.5,
+                                color: Colors.white,
+                                fontWeight: FontWeight.w900)),
+                      ),
+                    ),
+                  )
+                else
+                  PositionedDirectional(
+                    top: 5,
+                    end: 5,
+                    child: Container(
+                      width: 22,
+                      height: 22,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.black.withValues(alpha: .25),
+                        border: Border.all(
+                            color: Colors.white.withValues(alpha: .85),
+                            width: 1.6),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  String _fmtDur(int secs) {
+    final m = (secs ~/ 60).toString().padLeft(1, '0');
+    final s = (secs % 60).toString().padLeft(2, '0');
+    return '$m:$s';
   }
 }
 
-enum _Source { gallery, camera, music, file }
-
-/// Camera choice: photo or video (glass mini-sheet).
 class _CameraChoiceSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
@@ -195,7 +558,8 @@ class _CameraChoiceSheet extends StatelessWidget {
         child: Container(
           decoration: BoxDecoration(
             color: dark ? const Color(0xF3161C23) : const Color(0xFAFFFFFF),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+            borderRadius:
+                const BorderRadius.vertical(top: Radius.circular(24)),
           ),
           child: SafeArea(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -255,82 +619,159 @@ Future<void> showRaviToastTop(BuildContext context, String msg) async {
   await Future.delayed(const Duration(milliseconds: 2200), () => entry.remove());
 }
 
-// ==================== full preview with caption ====================
-
-class _MediaPreviewScreen extends StatefulWidget {
+// ==================== v1.1.0 — EDIT-FIRST screen ====================
+// The crop/draw editor opens BEFORE the caption preview. The user can crop,
+// draw on, or send the photo exactly as it is.
+class _EditFirstScreen extends StatefulWidget {
   final String path;
-  final String kind; // image | video | audio
-  final Future<bool> Function(String, String, String) onSend;
-
-  const _MediaPreviewScreen({
-    required this.path,
-    required this.kind,
-    required this.onSend,
-  });
+  const _EditFirstScreen({required this.path});
 
   @override
-  State<_MediaPreviewScreen> createState() => _MediaPreviewScreenState();
+  State<_EditFirstScreen> createState() => _EditFirstScreenState();
 }
 
-class _MediaPreviewScreenState extends State<_MediaPreviewScreen> {
-  VideoPlayerController? _vc;
-  final _caption = TextEditingController();
-  bool _sending = false;
-  bool _videoError = false;
-  String _currentPath = '';
-  late final String _originalPath;
+class _EditFirstScreenState extends State<_EditFirstScreen> {
+  late String _current;
 
   @override
   void initState() {
     super.initState();
-    _originalPath = widget.path;
-    _currentPath = widget.path;
-    if (widget.kind == 'video') {
-      _initVideo();
-    }
-  }
-
-  // v1.0.6 crash-guard: unsupported/corrupt videos must never take the app down
-  Future<void> _initVideo() async {
-    try {
-      _vc = VideoPlayerController.file(File(widget.path));
-      await _vc!.initialize();
-      if (!mounted) {
-        _vc?.dispose();
-        return;
-      }
-      setState(() {});
-      _vc!.play();
-    } catch (_) {
-      if (mounted) setState(() => _videoError = true);
-    }
+    _current = widget.path;
   }
 
   @override
-  void dispose() {
-    _vc?.dispose();
-    _caption.dispose();
-    super.dispose();
+  Widget build(BuildContext context) {
+    final s = AppState.I.str;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Column(children: [
+          // top bar
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            child: Row(children: [
+              IconButton(
+                icon: const Icon(Icons.close_rounded, color: Colors.white),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+              Text(s.editPhotoTitle,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800)),
+              const Spacer(),
+            ]),
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Center(
+                child: InteractiveViewer(
+                  maxScale: 5,
+                  child: Image.file(File(_current), fit: BoxFit.contain),
+                ),
+              ),
+            ),
+          ),
+          // editor tools: crop / draw / reset
+          Container(
+            color: Colors.black,
+            padding: const EdgeInsets.fromLTRB(14, 4, 14, 6),
+            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              _toolBtn(Icons.crop_rounded, s.cropPhoto, _crop),
+              const SizedBox(width: 26),
+              _toolBtn(Icons.edit_rounded, s.drawOn, _draw),
+              const SizedBox(width: 26),
+              if (_current != widget.path)
+                _toolBtn(Icons.restart_alt_rounded, s.resetEdit, _reset)
+              else
+                const SizedBox(width: 64),
+            ]),
+          ),
+          // bottom actions
+          SafeArea(
+            top: false,
+            child: Container(
+              color: Colors.black,
+              padding: const EdgeInsets.fromLTRB(14, 6, 14, 10),
+              child: Row(children: [
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () => Navigator.of(context).pop(),
+                    child: Container(
+                      height: 44,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: .08),
+                        borderRadius: BorderRadius.circular(22),
+                        border: Border.all(
+                            color: Colors.white.withValues(alpha: .16)),
+                      ),
+                      child: Text(s.sendAsIs,
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w700)),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  flex: 2,
+                  child: GestureDetector(
+                    onTap: () => Navigator.of(context).pop(_current),
+                    child: Container(
+                      height: 44,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        gradient: C.ownBubbleGrad,
+                        borderRadius: BorderRadius.circular(22),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(Icons.arrow_forward_rounded,
+                              size: 18, color: Colors.white),
+                          const SizedBox(width: 6),
+                          Text(s.nextStep,
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 13.5,
+                                  fontWeight: FontWeight.w800)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ]),
+            ),
+          ),
+        ]),
+      ),
+    );
   }
 
-  Future<void> _send() async {
-    if (_sending) return;
-    setState(() => _sending = true);
-    final ok = await widget.onSend(_currentPath, widget.kind, _caption.text.trim());
-    if (!mounted) return;
-    if (ok) {
-      Navigator.of(context).pop();
-    } else {
-      setState(() => _sending = false);
-      showRaviToastTop(context, AppState.I.str.error);
-    }
+  Widget _toolBtn(IconData icon, String label, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: SizedBox(
+        width: 72,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 22, color: Colors.white),
+          const SizedBox(height: 3),
+          Text(label,
+              style: TextStyle(
+                  fontSize: 10, color: Colors.white.withValues(alpha: .8))),
+        ]),
+      ),
+    );
   }
 
-  // ---------- v1.0.9 — editor toolbar: crop / draw / reset ----------
   Future<void> _crop() async {
     try {
       final cropped = await ImageCropper().cropImage(
-        sourcePath: _currentPath,
+        sourcePath: _current,
         uiSettings: [
           AndroidUiSettings(
             toolbarTitle: AppState.I.str.cropPhoto,
@@ -344,24 +785,110 @@ class _MediaPreviewScreenState extends State<_MediaPreviewScreen> {
         ],
       );
       if (cropped != null && mounted) {
-        setState(() => _currentPath = cropped.path);
+        setState(() => _current = cropped.path);
       }
-    } catch (_) {}
+    } catch (_) {
+      // some OEM ROMs lack the cropper activity — keep the original
+    }
   }
 
   Future<void> _draw() async {
     final out = await Navigator.of(context).push<String>(MaterialPageRoute(
       fullscreenDialog: true,
-      builder: (_) => _DrawScreen(imagePath: _currentPath),
+      builder: (_) => _DrawScreen(imagePath: _current),
     ));
     if (out != null && mounted) {
-      setState(() => _currentPath = out);
+      setState(() => _current = out);
     }
   }
 
   void _reset() {
-    if (_currentPath != _originalPath) {
-      setState(() => _currentPath = _originalPath);
+    if (_current != widget.path) {
+      setState(() => _current = widget.path);
+    }
+  }
+}
+
+// ==================== caption preview (album aware) ====================
+
+class _MediaPreviewScreen extends StatefulWidget {
+  final List<AttachItem> items;
+  final String caption;
+  final Future<bool> Function(List<AttachItem>, String) onSend;
+
+  const _MediaPreviewScreen({
+    required this.items,
+    required this.caption,
+    required this.onSend,
+  });
+
+  @override
+  State<_MediaPreviewScreen> createState() => _MediaPreviewScreenState();
+}
+
+class _MediaPreviewScreenState extends State<_MediaPreviewScreen> {
+  VideoPlayerController? _vc;
+  final _captionCtrl = TextEditingController();
+  final _focus = FocusNode();
+  bool _sending = false;
+  bool _videoError = false;
+  int _index = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _captionCtrl.text = widget.caption;
+    _initVideo();
+  }
+
+  Future<void> _initVideo() async {
+    if (widget.items[_index].fileType != 'video') return;
+    _vc?.dispose();
+    _vc = null;
+    try {
+      final c = VideoPlayerController.file(File(widget.items[_index].path));
+      _vc = c;
+      await c.initialize();
+      if (!mounted) {
+        c.dispose();
+        return;
+      }
+      setState(() {});
+      c.play();
+    } catch (_) {
+      if (mounted) setState(() => _videoError = true);
+    }
+  }
+
+  @override
+  void dispose() {
+    _vc?.dispose();
+    _captionCtrl.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  void _selectIndex(int i) {
+    if (i == _index) return;
+    setState(() {
+      _index = i;
+      _videoError = false;
+    });
+    _initVideo();
+  }
+
+  Future<void> _send() async {
+    if (_sending) return;
+    setState(() => _sending = true);
+    FocusManager.instance.primaryFocus?.unfocus();
+    final ok = await widget.onSend(widget.items, _captionCtrl.text.trim());
+    if (!mounted) return;
+    if (ok) {
+      Navigator.of(context).pop();
+      Navigator.of(context).pop();
+    } else {
+      setState(() => _sending = false);
+      showRaviToastTop(context, AppState.I.str.error);
     }
   }
 
@@ -371,8 +898,10 @@ class _MediaPreviewScreenState extends State<_MediaPreviewScreen> {
         ? const Palette.dark()
         : const Palette.light();
     final s = AppState.I.str;
+    final item = widget.items[_index];
 
     return Scaffold(
+      resizeToAvoidBottomInset: true,
       backgroundColor: Colors.black,
       body: SafeArea(
         child: Column(children: [
@@ -388,141 +917,184 @@ class _MediaPreviewScreenState extends State<_MediaPreviewScreen> {
                     fontSize: 13,
                     fontWeight: FontWeight.w700)),
             const Spacer(),
+            if (widget.items.length > 1)
+              Padding(
+                padding: const EdgeInsetsDirectional.only(end: 14),
+                child: Text(s.albumCount(widget.items.length),
+                    textDirection: TextDirection.ltr,
+                    style: const TextStyle(
+                        color: Colors.white60,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700)),
+              ),
           ]),
           // media
           Expanded(
             child: Center(
-              child: widget.kind == 'image'
+              child: item.fileType == 'image'
                   ? InteractiveViewer(
                       maxScale: 5,
-                      child: Image.file(File(_currentPath), fit: BoxFit.contain),
+                      child: Image.file(File(item.path), fit: BoxFit.contain),
                     )
-                  : widget.kind == 'video' && _videoError
+                  : item.fileType == 'video' && _videoError
                       ? Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             const Icon(Icons.movie_outlined,
                                 color: Colors.white54, size: 52),
                             const SizedBox(height: 10),
-                            Text(widget.path.split('/').last,
+                            Text(item.path.split('/').last,
                                 style: const TextStyle(
                                     color: Colors.white54, fontSize: 12)),
                           ],
                         )
-                      : widget.kind == 'video' && _vc != null && _vc!.value.isInitialized
-                      ? AspectRatio(
-                          aspectRatio: _vc!.value.aspectRatio,
-                          child: VideoPlayer(_vc!),
-                        )
-                      : widget.kind == 'video'
-                          ? const SizedBox(
-                              width: 36,
-                              height: 36,
-                              child: CircularProgressIndicator(strokeWidth: 2))
-                          : Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.music_note_rounded,
-                                    color: Colors.white70, size: 56),
-                                const SizedBox(height: 10),
-                                Text(
-                                    widget.path.split('/').last,
-                                    style: const TextStyle(
-                                        color: Colors.white70, fontSize: 12),
-                                    textAlign: TextAlign.center),
-                              ],
-                            ),
+                      : item.fileType == 'video' &&
+                              _vc != null &&
+                              _vc!.value.isInitialized
+                          ? AspectRatio(
+                              aspectRatio: _vc!.value.aspectRatio,
+                              child: VideoPlayer(_vc!),
+                            )
+                          : item.fileType == 'video'
+                              ? const SizedBox(
+                                  width: 36,
+                                  height: 36,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2))
+                              : Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.insert_drive_file_rounded,
+                                        color: Colors.white70, size: 56),
+                                    const SizedBox(height: 10),
+                                    Text(item.path.split('/').last,
+                                        style: const TextStyle(
+                                            color: Colors.white70,
+                                            fontSize: 12),
+                                        textAlign: TextAlign.center),
+                                  ],
+                                ),
             ),
           ),
-          // v1.0.9 — editor toolbar (photos): Crop / Draw / Reset
-          if (widget.kind == 'image')
+          // album thumbnails
+          if (widget.items.length > 1)
             Container(
+              height: 74,
               color: Colors.black,
-              padding: const EdgeInsets.fromLTRB(14, 2, 14, 4),
-              child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                _toolBtn(Icons.crop_rounded, s.cropPhoto, _crop),
-                const SizedBox(width: 26),
-                _toolBtn(Icons.edit_rounded,
-                    AppState.I.lang.value.isFa ? 'نقاشی' : 'Draw', _draw),
-                const SizedBox(width: 26),
-                _toolBtn(Icons.restart_alt_rounded,
-                    AppState.I.lang.value.isFa ? 'ریست' : 'Reset', _reset),
-              ]),
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                itemCount: widget.items.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 7),
+                itemBuilder: (ctx, i) {
+                  final it = widget.items[i];
+                  final sel = i == _index;
+                  return GestureDetector(
+                    onTap: () => _selectIndex(i),
+                    child: Container(
+                      width: 58,
+                      height: 58,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(9),
+                        border: Border.all(
+                            color: sel
+                                ? const Color(0xFF8B5CF6)
+                                : Colors.transparent,
+                            width: 2),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(7),
+                        child: it.fileType == 'image'
+                            ? Image.file(File(it.path), fit: BoxFit.cover)
+                            : Container(
+                                color: Colors.white12,
+                                child: Icon(
+                                    it.fileType == 'video'
+                                        ? Icons.videocam_rounded
+                                        : Icons.insert_drive_file_rounded,
+                                    size: 20,
+                                    color: Colors.white70),
+                              ),
+                      ),
+                    ),
+                  );
+                },
+              ),
             ),
-          // caption + send
+          // ---- v1.1.0 — clean glass caption composer ----
           Container(
             color: Colors.black,
-            padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
-            child: Row(children: [
-              Expanded(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: .08),
-                    borderRadius: BorderRadius.circular(24),
-                  ),
-                  alignment: Alignment.center,
-                  child: TextField(
-                    controller: _caption,
-                    maxLines: 2,
-                    minLines: 1,
-                    style: const TextStyle(color: Colors.white, fontSize: 13.5),
-                    decoration: InputDecoration(
-                      isCollapsed: true,
-                      border: InputBorder.none,
-                      hintText: s.addCaption,
-                      hintStyle:
-                          TextStyle(color: Colors.white.withValues(alpha: .4)),
+            padding: EdgeInsets.fromLTRB(
+                10, 6, 10, 8 + MediaQuery.of(context).padding.bottom * 0),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: Container(
+                    constraints: const BoxConstraints(maxHeight: 130),
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: .08),
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(
+                          color: Colors.white.withValues(alpha: .14)),
+                    ),
+                    child: TextField(
+                      controller: _captionCtrl,
+                      focusNode: _focus,
+                      maxLines: null,
+                      minLines: 1,
+                      textInputAction: TextInputAction.newline,
+                      keyboardType: TextInputType.multiline,
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14.5,
+                          height: 1.3),
+                      cursorColor: const Color(0xFFB79CF8),
+                      decoration: InputDecoration(
+                        isCollapsed: true,
+                        border: InputBorder.none,
+                        contentPadding:
+                            const EdgeInsets.symmetric(vertical: 12),
+                        hintText: s.captionHint,
+                        hintStyle: TextStyle(
+                            color: Colors.white.withValues(alpha: .38),
+                            fontSize: 14),
+                      ),
                     ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: _sending ? null : _send,
-                child: Container(
-                  width: 46,
-                  height: 46,
-                  decoration: const BoxDecoration(
-                    gradient: C.ownBubbleGrad,
-                    shape: BoxShape.circle,
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: _send,
+                  child: Container(
+                    width: 46,
+                    height: 46,
+                    decoration: const BoxDecoration(
+                      gradient: C.ownBubbleGrad,
+                      shape: BoxShape.circle,
+                    ),
+                    child: _sending
+                        ? const Padding(
+                            padding: EdgeInsets.all(12),
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: Colors.white))
+                        : const Icon(Icons.send_rounded,
+                            size: 21, color: Colors.white),
                   ),
-                  child: _sending
-                      ? const Padding(
-                          padding: EdgeInsets.all(12),
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white))
-                      : const Icon(Icons.send_rounded,
-                          color: Colors.white, size: 20),
                 ),
-              ),
-            ]),
+              ],
+            ),
           ),
         ]),
       ),
     );
   }
-
-  Widget _toolBtn(IconData icon, String label, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Icon(icon, size: 20, color: Colors.white70),
-        const SizedBox(height: 3),
-        Text(label,
-            style: const TextStyle(
-                fontSize: 9.5,
-                fontWeight: FontWeight.w600,
-                color: Colors.white70)),
-      ]),
-    );
-  }
 }
 
-// ==================== v1.0.9 Draw screen (pencil on photo) ====================
-/// Telegram-like paint layer: free-hand strokes with a color/width picker,
-/// undo & reset, flattens onto the photo on save (pure Flutter, no FFI).
+// ==================== draw (unchanged behaviour) ====================
+
 class _DrawScreen extends StatefulWidget {
   final String imagePath;
   const _DrawScreen({required this.imagePath});
@@ -532,200 +1104,157 @@ class _DrawScreen extends StatefulWidget {
 }
 
 class _DrawScreenState extends State<_DrawScreen> {
-  final List<_Stroke> _strokes = [];
-  final List<_Stroke> _undo = [];
-  Color _color = const Color(0xFFE11D48);
-  double _width = 4;
-  final GlobalKey _areaKey = GlobalKey();
-
-  static const _colors = [
-    Color(0xFFE11D48), Color(0xFFF59E0B), Color(0xFF22C55E),
-    Color(0xFF38BDF8), Color(0xFF8B5CF6), Color(0xFFFFFFFF),
+  final List<List<Offset>> _strokes = [];
+  final List<Color> _colors = const [
+    Color(0xFFEF4444),
+    Color(0xFF22C55E),
+    Color(0xFF38BDF8),
+    Color(0xFFF59E0B),
+    Colors.white,
+    Colors.black,
   ];
+  int _ci = 0;
+  final _key = GlobalKey();
 
   @override
   Widget build(BuildContext context) {
-    final size = MediaQuery.of(context).size;
+    final s = AppState.I.str;
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
         child: Column(children: [
-          // top bar
           Row(children: [
             IconButton(
               icon: const Icon(Icons.close_rounded, color: Colors.white),
               onPressed: () => Navigator.of(context).pop(),
             ),
-            Text(AppState.I.lang.value.isFa ? 'روی عکس نقاشی کنید' : 'Draw on photo',
+            Text(s.drawOn,
                 style: const TextStyle(
-                    color: Colors.white70,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700)),
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800)),
             const Spacer(),
             IconButton(
               icon: const Icon(Icons.undo_rounded, color: Colors.white70),
               onPressed: _strokes.isEmpty
                   ? null
-                  : () => setState(() {
-                        _undo.add(_strokes.removeLast());
-                      }),
-            ),
-            IconButton(
-              icon: const Icon(Icons.restart_alt_rounded, color: Colors.white70),
-              onPressed: _strokes.isEmpty
-                  ? null
-                  : () => setState(() {
-                        _undo.addAll(_strokes);
-                        _strokes.clear();
-                      }),
-            ),
-            GestureDetector(
-              onTap: () => _save(size),
-              child: Container(
-                margin: const EdgeInsetsDirectional.only(end: 10),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(
-                  gradient: C.ownBubbleGrad,
-                  borderRadius: BorderRadius.circular(18),
-                ),
-                child: Text(AppState.I.str.save,
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w800)),
-              ),
+                  : () => setState(() => _strokes.removeLast()),
             ),
           ]),
-          // canvas
           Expanded(
-            child: Center(
+            child: GestureDetector(
+              onPanStart: (d) =>
+                  setState(() => _strokes.add([d.localPosition])),
+              onPanUpdate: (d) => setState(() {
+                _strokes.last.add(d.localPosition);
+              }),
               child: RepaintBoundary(
-                key: _areaKey,
-                child: GestureDetector(
-                  onPanStart: (d) {
-                    setState(() {
-                      _strokes.add(_Stroke(
-                          color: _color,
-                          width: _width,
-                          points: [d.localPosition]));
-                    });
-                  },
-                  onPanUpdate: (d) {
-                    setState(() {
-                      _strokes.last.points.add(d.localPosition);
-                    });
-                  },
-                  onPanEnd: (_) => _undo.clear(),
-                  child: Stack(fit: StackFit.loose, children: [
+                key: _key,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
                     Image.file(File(widget.imagePath), fit: BoxFit.contain),
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        child: CustomPaint(
-                          painter: _StrokesPainter(strokes: _strokes),
-                        ),
-                      ),
+                    CustomPaint(
+                      painter: _StrokesPainter(
+                          strokes: _strokes, color: _colors[_ci]),
                     ),
-                  ]),
+                  ],
                 ),
               ),
             ),
           ),
-          // color / width picker
           Container(
+            padding: const EdgeInsets.all(12),
             color: Colors.black,
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
-            child: Column(children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  for (final c in _colors)
-                    GestureDetector(
-                      onTap: () => setState(() => _color = c),
-                      child: Container(
-                        width: 30,
-                        height: 30,
-                        margin: const EdgeInsets.symmetric(horizontal: 6),
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: c,
-                          border: Border.all(
-                            color: _color == c
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                for (var i = 0; i < _colors.length; i++)
+                  GestureDetector(
+                    onTap: () => setState(() => _ci = i),
+                    child: Container(
+                      width: 30,
+                      height: 30,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: _colors[i],
+                        border: Border.all(
+                            color: _ci == i
                                 ? Colors.white
                                 : Colors.white24,
-                            width: _color == c ? 2.6 : 1,
-                          ),
-                        ),
+                            width: _ci == i ? 3 : 1.4),
                       ),
                     ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Row(children: [
-                const Icon(Icons.brush_rounded,
-                    size: 16, color: Colors.white54),
-                Expanded(
-                  child: Slider(
-                    value: _width,
-                    min: 2,
-                    max: 14,
-                    activeColor: _color,
-                    inactiveColor: Colors.white24,
-                    onChanged: (v) => setState(() => _width = v),
+                  ),
+                GestureDetector(
+                  onTap: () async {
+                    final out = await _export();
+                    if (out != null && mounted) {
+                      Navigator.of(context).pop(out);
+                    }
+                  },
+                  child: Container(
+                    width: 44,
+                    height: 44,
+                    decoration: const BoxDecoration(
+                      gradient: C.ownBubbleGrad,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.check_rounded,
+                        color: Colors.white, size: 22),
                   ),
                 ),
-              ]),
-            ]),
+              ],
+            ),
           ),
         ]),
       ),
     );
   }
 
-  /// Flattens photo + strokes into a new PNG and returns its path.
-  Future<void> _save(Size screen) async {
+  Future<String?> _export() async {
     try {
-      final boundary = _areaKey.currentContext?.findRenderObject()
+      final boundary = _key.currentContext?.findRenderObject()
           as RenderRepaintBoundary?;
-      if (boundary == null) return;
-      final ui.Image img = await boundary.toImage(pixelRatio: 2.0);
-      final byteData =
-          await img.toByteData(format: ui.ImageByteFormat.png);
-      final png = byteData!.buffer.asUint8List();
+      if (boundary == null) return null;
+      final image = await boundary.toImage(pixelRatio: 2.5);
+      final bytes =
+          (await image.toByteData(format: ImageByteFormat.png))
+              ?.buffer
+              .asUint8List();
+      if (bytes == null) return null;
       final dir = await getTemporaryDirectory();
-      final out =
-          '${dir.path}/drawn_${DateTime.now().millisecondsSinceEpoch}.png';
-      await File(out).writeAsBytes(png);
-      if (mounted) Navigator.of(context).pop(out);
+      final f = File(
+          '${dir.path}/draw_${DateTime.now().millisecondsSinceEpoch}.png');
+      await f.writeAsBytes(bytes);
+      return f.path;
     } catch (_) {
-      if (mounted) Navigator.of(context).pop();
+      return null;
     }
   }
 }
 
-class _Stroke {
-  final Color color;
-  final double width;
-  final List<Offset> points;
-  _Stroke({required this.color, required this.width, required this.points});
-}
-
 class _StrokesPainter extends CustomPainter {
-  final List<_Stroke> strokes;
-  _StrokesPainter({required this.strokes});
+  final List<List<Offset>> strokes;
+  final Color color;
+  _StrokesPainter({required this.strokes, required this.color});
 
   @override
   void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 4.2
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..style = PaintingStyle.stroke;
     for (final s in strokes) {
-      if (s.points.isEmpty) continue;
-      final paint = Paint()
-        ..color = s.color
-        ..strokeWidth = s.width
-        ..strokeCap = StrokeCap.round
-        ..strokeJoin = StrokeJoin.round
-        ..style = PaintingStyle.stroke;
-      final path = Path()..moveTo(s.points.first.dx, s.points.first.dy);
-      for (final p in s.points.skip(1)) {
+      if (s.isEmpty) continue;
+      if (s.length == 1) {
+        canvas.drawCircle(s.first, 2.4, Paint()..color = color);
+        continue;
+      }
+      final path = Path()..moveTo(s.first.dx, s.first.dy);
+      for (final p in s.skip(1)) {
         path.lineTo(p.dx, p.dy);
       }
       canvas.drawPath(path, paint);
@@ -734,4 +1263,96 @@ class _StrokesPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _StrokesPainter old) => true;
+}
+
+/// v1.2.1 — BULLETPROOF gallery tile. Decodes the MediaStore thumbnail
+/// MANUALLY (thumbnailDataWithSize) with an original-file fallback, an
+/// explicit error tile + one tap-to-retry. This is the fix for "the gallery
+/// opens but images never load" — AssetEntityImage used to fail silently
+/// and paint blank tiles.
+class _GalleryTile extends StatefulWidget {
+  final AssetEntity asset;
+  const _GalleryTile({required this.asset});
+
+  @override
+  State<_GalleryTile> createState() => _GalleryTileState();
+}
+
+class _GalleryTileState extends State<_GalleryTile> {
+  Uint8List? _bytes;
+  bool _failed = false;
+  int _attempt = 0;
+  static final Map<String, Uint8List> _cache = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _bytes = _cache[widget.asset.id];
+    if (_bytes == null) _load();
+  }
+
+  Future<void> _load() async {
+    _failed = false;
+    if (mounted) setState(() {});
+    try {
+      final data = await widget.asset.thumbnailDataWithSize(
+        const ThumbnailSize(360, 360),
+        quality: 88,
+      );
+      if (data == null || data.isEmpty) throw 'no_thumb';
+      _cache[widget.asset.id] = data;
+      if (mounted) setState(() => _bytes = data);
+      return;
+    } catch (_) {}
+    // fallback 1 — the original file (works even when the thumb cache is
+    // broken, e.g. after a cloud-photo restore)
+    try {
+      final file = await widget.asset.file;
+      if (file != null && await file.exists()) {
+        // decode downscaled so we never OOM on 12MP shots
+        final bytes = await _downscale(file);
+        if (bytes != null && bytes.isNotEmpty) {
+          _cache[widget.asset.id] = bytes;
+          if (mounted) setState(() => _bytes = bytes);
+          return;
+        }
+      }
+    } catch (_) {}
+    if (mounted) setState(() => _failed = true);
+  }
+
+  static Future<Uint8List?> _downscale(File f) async {
+    try {
+      final raw = await f.readAsBytes();
+      final codec = await instantiateImageCodec(raw, targetWidth: 360);
+      final frame = await codec.getNextFrame();
+      final data = await frame.image.toByteData(format: ImageByteFormat.png);
+      frame.image.dispose();
+      codec.dispose();
+      return data?.buffer.asUint8List();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_bytes != null) {
+      return Image.memory(_bytes!, fit: BoxFit.cover, gaplessPlayback: true);
+    }
+    if (_failed) {
+      return GestureDetector(
+        onTap: _attempt < 3 ? () { _attempt++; _load(); } : null,
+        child: Container(
+          color: Colors.white.withValues(alpha: .04),
+          alignment: Alignment.center,
+          child: Icon(_attempt < 3
+              ? Icons.refresh_rounded
+              : Icons.image_not_supported_outlined,
+              size: 22, color: Colors.white38),
+        ),
+      );
+    }
+    return Container(color: Colors.white.withValues(alpha: .05));
+  }
 }

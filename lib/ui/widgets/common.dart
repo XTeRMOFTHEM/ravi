@@ -1,12 +1,37 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/api_service.dart';
+import '../../core/app_state.dart';
 import '../../core/constants.dart';
+import 'premium_logo.dart';
+
+/// v1.1.0 — first-strong bidi detection (Telegram behaviour): a paragraph
+/// follows the first strong directional character. Fixes Persian text with a
+/// trailing emoji / English word rendering on the wrong side.
+TextDirection bidiDirectionOf(String text, {TextDirection? fallback}) {
+  for (final r in text.runes) {
+    // Hebrew + Arabic (incl. supplements & presentation forms)
+    if ((r >= 0x0590 && r <= 0x08FF) ||
+        (r >= 0xFB1D && r <= 0xFDFD) ||
+        (r >= 0xFE70 && r <= 0xFEFC)) {
+      return TextDirection.rtl;
+    }
+    // Latin / Latin-1 letters / Latin extended
+    if ((r >= 0x0041 && r <= 0x005A) ||
+        (r >= 0x0061 && r <= 0x007A) ||
+        (r >= 0x00C0 && r <= 0x024F)) {
+      return TextDirection.ltr;
+    }
+  }
+  return fallback ?? TextDirection.ltr;
+}
 
 /// v1.0.8 — avatar with the animated Pro frame, EXACTLY like index.html:
 /// the frame PNG is painted at **200% of the avatar size** centered on it
@@ -166,6 +191,8 @@ class RaviAvatar extends StatelessWidget {
   final double size;
   final bool globe;
   final bool chatHeader;
+  // v1.4.0 — سیو مسیج: بوکمارک طلایی به‌جای آواتار (مثل تلگرام)
+  final bool bookmark;
 
   static final Map<String, int> _hashCache = {};
 
@@ -176,6 +203,7 @@ class RaviAvatar extends StatelessWidget {
     this.size = 57,
     this.globe = false,
     this.chatHeader = false,
+    this.bookmark = false,
   });
 
   int _gradientIndex() {
@@ -198,6 +226,27 @@ class RaviAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // v1.4.0 — سیو مسیج: بوکمارک طلایی (مثل تلگرام)
+    if (bookmark) {
+      return SizedBox(
+        width: size,
+        height: size,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xFFF7B733), Color(0xFFE88D1A)],
+            ),
+            shape: BoxShape.circle,
+          ),
+          child: Center(
+            child: Icon(Icons.bookmark_rounded,
+                size: size * 0.46, color: Colors.white),
+          ),
+        ),
+      );
+    }
     final hasImg = avatarPath.isNotEmpty &&
         !avatarPath.contains('default.png') &&
         avatarPath != 'None';
@@ -313,105 +362,289 @@ class VerifiedBadge extends StatelessWidget {
 ///  • proStarShine      — a light sweep masked to the star shape (3s)
 class ProStarBadge extends StatefulWidget {
   final double size;
-  final bool animate; // small list rows use a static 12px star like the web
+  final bool animate; // small list rows use a static glyph (list performance)
+  // v1.3.2 — Telegram-inspired one-shot ENTRANCE: the badge pops in with a
+  // springy overshoot + halo flash, then settles into the ambient pulse.
+  final bool entrance;
+  // v1.5.0 — profile taps open the animated premium tag + feature list.
+  final VoidCallback? onTap;
 
-  const ProStarBadge({super.key, this.size = 20, this.animate = true});
+  const ProStarBadge(
+      {super.key,
+      this.size = 20,
+      this.animate = true,
+      this.entrance = false,
+      this.onTap});
 
   @override
   State<ProStarBadge> createState() => _ProStarBadgeState();
 }
 
+/// v1.5.0 — PREMIUM LOGO badge (the animated dart logo the user provided):
+/// • همه‌جا همان لوگوی انیمیشنی رسم می‌شود (aura + glint + ستاره چرخان)
+/// • ردیف‌های لیست: نسخه‌ی ثابت (بدون هیچ کنترلری — پرفورمنس موبایل ضعیف)
+/// • پروفایل‌ها/هدر: PremiumLogo با چرخه‌ی ۸ ثانیه‌ای + ورود فنری تلگرامی
 class _ProStarBadgeState extends State<ProStarBadge>
     with TickerProviderStateMixin {
-  late final AnimationController _pulse = AnimationController(
-      vsync: this, duration: const Duration(milliseconds: 2400))
-    ..repeat(reverse: false);
-  late final AnimationController _shine = AnimationController(
-      vsync: this, duration: const Duration(milliseconds: 3200))
-    ..repeat();
+  late final AnimationController _enter = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 650));
+  late final AnimationController _burst = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 700));
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.entrance) {
+      _enter.forward();
+      _burst.forward();
+    } else {
+      _enter.value = 1.0;
+    }
+  }
 
   @override
   void dispose() {
-    _pulse.dispose();
-    _shine.dispose();
+    _enter.dispose();
+    _burst.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    // v1.0.9 — full rewrite of the animation:
-    //  • the badge lives inside a FIXED-SIZE RepaintBoundary → nothing around
-    //    it (name, info) can ever move; scaling is paint-only.
-    //  • the old saveLayer shine (which rendered an ugly translucent SQUARE on
-    //    several devices) is gone. The sparkle is now two clean paint passes:
-    //    a soft radial halo + a ShaderMask sweep inside the star silhouette.
-    final img = Image.asset('assets/pro_star.png',
-        width: widget.size, height: widget.size, filterQuality: FilterQuality.medium);
-    if (!widget.animate) return img;
-    return RepaintBoundary(
+    // v1.5.0 — لوگوی انیمیشنی Premium (فایل dart داده‌شده) همه‌جا:
+    //  • ردیف‌های لیست: نقاشی ثابت (بدون کنترلر — پرفورمنس لیست)
+    //  • پروفایل/هدر چت: PremiumLogo کامل با انیمیشن aura+glint+ستاره،
+    //    در پروفایل‌ها چرخه‌ی ۸ ثانیه‌ای
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final logoColor = dark ? const Color(0xFFE8ECF3) : const Color(0xFF14161B);
+
+    final Widget badge;
+    if (!widget.animate) {
+      // static glyph — zero controllers, safe for long scrolling lists
+      badge = PremiumLogoStatic(
+        size: widget.size,
+        logoColor: logoColor,
+      );
+    } else {
+      badge = PremiumLogo(
+        size: widget.size,
+        logoColor: logoColor,
+        accentA: kPremiumAccentA,
+        accentB: kPremiumAccentB,
+        // پروفایل‌ها و هدرها: تکرار هر ۸ ثانیه (طبق درخواست)
+        duration: const Duration(seconds: 8),
+      );
+    }
+
+    final Widget out = RepaintBoundary(
       child: SizedBox(
         width: widget.size,
         height: widget.size,
-        child: AnimatedBuilder(
-          animation: Listenable.merge([_pulse, _shine]),
-          builder: (context, _) {
-            final t = Curves.easeInOut.transform(_pulse.value);
-            return Stack(
-              fit: StackFit.expand,
-              clipBehavior: Clip.none,
-              children: [
-                // soft radial halo behind the star (paint-only, no layout)
-                Transform.scale(
-                  scale: 1.55 + 0.25 * t,
-                  child: const DecoratedBox(
+        child: widget.entrance
+            ? AnimatedBuilder(
+                animation: Listenable.merge([_enter, _burst]),
+                builder: (context, _) {
+                  final e = _enter.value;
+                  final back = Curves.easeOutBack.transform(e);
+                  final enterScale = (0.2 + 0.8 * back).clamp(0.0, 1.3);
+                  final burstT = Curves.easeOutCubic.transform(_burst.value);
+                  return Stack(
+                    fit: StackFit.expand,
+                    clipBehavior: Clip.none,
+                    alignment: Alignment.center,
+                    children: [
+                      if (burstT < 1.0)
+                        CustomPaint(
+                          painter: _StarBurstPainter(
+                              progress: burstT,
+                              color: const Color(0xFF9FCBFF)),
+                        ),
+                      Transform.scale(
+                        scale: enterScale,
+                        child: badge,
+                      ),
+                    ],
+                  );
+                },
+              )
+            : badge,
+      ),
+    );
+
+    if (widget.onTap == null) return out;
+    return GestureDetector(onTap: widget.onTap, child: out);
+  }
+}
+
+/// v1.5.0 — تگ انیمیشنی پرمیوم: لمسِ لوگو در پروفایل → یک تگ «PREMIUM» با
+/// انیمیشن از بالای لوگو بالا می‌آید و پایینِ آن توضیح قابلیت‌ها باز می‌شود.
+class ProStarTag extends StatefulWidget {
+  final double size;
+  const ProStarTag({super.key, this.size = 20});
+
+  @override
+  State<ProStarTag> createState() => _ProStarTagState();
+}
+
+class _ProStarTagState extends State<ProStarTag>
+    with SingleTickerProviderStateMixin {
+  bool _open = false;
+  late final AnimationController _c = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 380));
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  void _toggle() {
+    setState(() => _open = !_open);
+    _open ? _c.forward() : _c.reverse();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = Theme.of(context).brightness == Brightness.dark
+        ? const Palette.dark()
+        : const Palette.light();
+    final s = AppState.I.str;
+    final curved = CurvedAnimation(parent: _c, curve: Curves.easeOutBack);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // ---- the animated tag above the logo ----
+        ClipRect(
+          child: Align(
+            alignment: Alignment.topCenter,
+            heightFactor: _open ? 1.0 : 0.0,
+            child: ScaleTransition(
+              scale: Tween(begin: 0.6, end: 1.0).animate(curved),
+              alignment: Alignment.bottomCenter,
+              child: FadeTransition(
+                opacity: curved,
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: RadialGradient(
-                        colors: [
-                          Color(0x59FFC94A),
-                          Color(0x00FFC94A),
-                        ],
+                      borderRadius: BorderRadius.circular(999),
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF8F7BFF), Color(0xFF7AA7FF)],
+                      ),
+                      boxShadow: const [
+                        BoxShadow(
+                            color: Color(0x558F7BFF),
+                            blurRadius: 14,
+                            offset: Offset(0, 3)),
+                      ],
+                    ),
+                    child: Text(
+                      s.premiumTagTitle,
+                      textDirection: TextDirection.ltr,
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1.4,
+                        color: Colors.white,
                       ),
                     ),
                   ),
                 ),
-                // the star itself, gentle scale pulse (paint-only)
-                Transform.scale(
-                  scale: 1.0 + 0.08 * t,
-                  child: ShaderMask(
-                    shaderCallback: (rect) {
-                      // diagonal light sweep inside the star shape
-                      final p = _shine.value;
-                      final dx = (p * 2.4 - 1.2) * rect.width;
-                      return ui.Gradient.linear(
-                        Offset(dx, 0),
-                        Offset(dx + rect.width * 0.55, rect.height),
-                        const [
-                          Color(0xFFFFFFFF),
-                          Color(0xAFFFFFFF),
-                          Color(0xFFFFFFFF),
-                        ],
-                      );
-                    },
-                    blendMode: BlendMode.srcATop,
-                    child: Opacity(
-                      opacity: 0.16,
-                      child: img,
-                    ),
-                  ),
-                ),
-                img,
-              ],
-            );
-          },
+              ),
+            ),
+          ),
         ),
-      ),
+        // ---- the animated logo itself ----
+        GestureDetector(
+          onTap: _toggle,
+          child: ProStarBadge(size: widget.size, animate: true),
+        ),
+        // ---- the feature description below ----
+        AnimatedSize(
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOutCubic,
+          alignment: Alignment.topCenter,
+          child: _open
+              ? Container(
+                  margin: const EdgeInsets.only(top: 8),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: p.bgSoft,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: p.borderSoft),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(s.premiumTagDesc,
+                          style: TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w800,
+                              color: p.text)),
+                      const SizedBox(height: 6),
+                      for (final f in s.premiumFeatures)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 2),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(Icons.auto_awesome_rounded,
+                                  size: 11, color: Color(0xFF8F7BFF)),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(f,
+                                    style: TextStyle(
+                                        fontSize: 10.5,
+                                        height: 1.4,
+                                        color: p.text2)),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                )
+              : const SizedBox.shrink(),
+        ),
+      ],
     );
   }
 }
 
-/// Circular progress ring that hugs a play button (Telegram download / play
-/// visualization). Draw `stroke` on top of the child widget.
+/// باریکه‌ی ورود تلگرامی: ۶ پرتو کوتاه از مرکز که باز و محو می‌شوند
+class _StarBurstPainter extends CustomPainter {
+  final double progress; // 0..1
+  final Color color;
+  _StarBurstPainter({required this.progress, required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final c = Offset(size.width / 2, size.height / 2);
+    final r = size.width * 0.5;
+    final t = progress;
+    final len = r * (0.55 + 0.75 * t);
+    final alpha = (1.0 - t) * 0.85;
+    final paint = Paint()
+      ..color = color.withValues(alpha: alpha.clamp(0.0, 1.0))
+      ..strokeWidth = math.max(0.9, r * 0.10 * (1.0 - 0.5 * t))
+      ..strokeCap = StrokeCap.round;
+    for (var i = 0; i < 6; i++) {
+      final ang = -math.pi / 2 + i * math.pi / 3;
+      final from = Offset(c.dx + r * 0.55 * math.cos(ang),
+          c.dy + r * 0.55 * math.sin(ang));
+      final to = Offset(c.dx + len * math.cos(ang), c.dy + len * math.sin(ang));
+      canvas.drawLine(from, to, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_StarBurstPainter old) => old.progress != progress;
+}
+
 class RingProgress extends StatelessWidget {
   final double progress; // 0..1 (<=0 → indeterminate spin)
   final double size;
@@ -883,4 +1116,212 @@ class _FloatMenuAnim {
 class _MenuTicker extends TickerProvider {
   @override
   Ticker createTicker(TickerCallback onTick) => Ticker(onTick);
+}
+
+/// v1.5.0 — لوگوی پرمیومِ پروفایل با «تگِ بازشو»:
+/// لمس لوگو → یک تگ PREMIUM با انیمیشن از بالای لوگو بالا می‌آید و زیر آن
+/// لیستِ قابلیت‌ها باز می‌شود (Overlay مستقل — چیدمان پروفایل نمی‌شکند).
+/// انیمیشن لوگو با چرخه‌ی ۸ ثانیه‌ای تکرار می‌شود.
+class PremiumProfileBadge extends StatefulWidget {
+  final double size;
+  const PremiumProfileBadge({super.key, this.size = 20});
+
+  @override
+  State<PremiumProfileBadge> createState() => _PremiumProfileBadgeState();
+}
+
+class _PremiumProfileBadgeState extends State<PremiumProfileBadge> {
+  final GlobalKey _anchorKey = GlobalKey();
+  OverlayEntry? _entry;
+
+  void _toggle() {
+    HapticFeedback.selectionClick();
+    if (_entry != null) {
+      _remove();
+      return;
+    }
+    _entry = OverlayEntry(
+      builder: (ctx) => _PremiumTagOverlay(
+        anchorKey: _anchorKey,
+        onDismiss: _remove,
+      ),
+    );
+    Overlay.of(context, rootOverlay: true).insert(_entry!);
+  }
+
+  void _remove() {
+    try {
+      _entry?.remove();
+    } catch (_) {}
+    _entry = null;
+  }
+
+  @override
+  void dispose() {
+    _remove();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      key: _anchorKey,
+      onTap: _toggle,
+      child: ProStarBadge(size: widget.size, animate: true),
+    );
+  }
+}
+
+class _PremiumTagOverlay extends StatefulWidget {
+  final GlobalKey anchorKey;
+  final VoidCallback onDismiss;
+  const _PremiumTagOverlay({required this.anchorKey, required this.onDismiss});
+
+  @override
+  State<_PremiumTagOverlay> createState() => _PremiumTagOverlayState();
+}
+
+class _PremiumTagOverlayState extends State<_PremiumTagOverlay>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 420))
+    ..forward();
+
+  Rect _anchorRect(BuildContext ctx) {
+    final box =
+        widget.anchorKey.currentContext?.findRenderObject() as RenderBox?;
+    final overlay =
+        Overlay.of(ctx, rootOverlay: true).context.findRenderObject() as RenderBox?;
+    if (box == null || overlay == null || !box.attached) {
+      return const Rect.fromLTWH(0, 0, 1, 1);
+    }
+    return box.localToGlobal(Offset.zero) & box.size;
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = AppState.I.str;
+    final mq = MediaQuery.of(context);
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final p =
+        dark ? const Palette.dark() : const Palette.light();
+    final rect = _anchorRect(context);
+    const cardW = 268.0;
+    final left = (rect.center.dx - cardW / 2)
+        .clamp(10.0, mq.size.width - cardW - 10.0);
+    final top = (rect.bottom + 8)
+        .clamp(10.0, mq.size.height - 240.0);
+    final curved = CurvedAnimation(parent: _c, curve: Curves.easeOutCubic);
+
+    return Stack(
+      children: [
+        // بستن با لمس بیرون
+        Positioned.fill(
+          child: GestureDetector(onTap: widget.onDismiss),
+        ),
+        Positioned(
+          left: left,
+          top: top,
+          child: FadeTransition(
+            opacity: curved,
+            child: SlideTransition(
+              position: Tween(begin: const Offset(0, -0.12), end: Offset.zero)
+                  .animate(curved),
+              child: Material(
+                color: Colors.transparent,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    // ---- تگ PREMIUM ----
+                    ScaleTransition(
+                      scale: Tween(begin: 0.5, end: 1.0)
+                          .animate(CurvedAnimation(
+                              parent: _c, curve: Curves.easeOutBack)),
+                      alignment: Alignment.bottomCenter,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 5),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(999),
+                          gradient: const LinearGradient(
+                            colors: [Color(0xFF8F7BFF), Color(0xFF7AA7FF)],
+                          ),
+                          boxShadow: const [
+                            BoxShadow(
+                                color: Color(0x558F7BFF),
+                                blurRadius: 16,
+                                offset: Offset(0, 4)),
+                          ],
+                        ),
+                        child: Text(s.premiumTagTitle,
+                            textDirection: TextDirection.ltr,
+                            style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1.6,
+                                color: Colors.white)),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    // ---- توضیح قابلیت‌ها ----
+                    Container(
+                      width: cardW,
+                      padding: const EdgeInsets.all(13),
+                      decoration: BoxDecoration(
+                        color: p.navBg,
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(color: p.borderSoft),
+                        boxShadow: const [
+                          BoxShadow(
+                              color: Color(0x3D122A46),
+                              blurRadius: 30,
+                              offset: Offset(0, 14)),
+                        ],
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(s.premiumTagDesc,
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w800,
+                                  color: p.text)),
+                          const SizedBox(height: 7),
+                          for (final f in s.premiumFeatures)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 2.5),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Icon(Icons.auto_awesome_rounded,
+                                      size: 12, color: Color(0xFF8F7BFF)),
+                                  const SizedBox(width: 7),
+                                  Expanded(
+                                    child: Text(f,
+                                        style: TextStyle(
+                                            fontSize: 11,
+                                            height: 1.4,
+                                            color: p.text2)),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 }

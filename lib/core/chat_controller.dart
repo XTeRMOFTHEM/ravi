@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
 import 'api_service.dart';
 import 'cache_service.dart';
+import 'media_download_manager.dart';
 import 'models.dart';
 import 'socket_service.dart';
 
@@ -25,9 +27,23 @@ class ChatController extends ChangeNotifier {
     required this.kind,
     this.chatId = 0,
     this.roomId = 'general',
+    this.selfOnly = false,
   });
 
+  /// چت «پیام‌های ذخیره‌شده»: فقط پیام‌های خودِ کاربر نمایش داده می‌شود.
+  final bool selfOnly;
+  bool _keep(Message m) => !selfOnly || m.isMe;
+
   final List<Message> _messages = [];
+  /// لغو آپلودِ در حال انجام (دکمه‌ی ✕ روی حباب)
+  void cancelUpload(String clientMsgId) => UploadRegistry.cancel(clientMsgId);
+  // v1.4.0 — ضدپرش به سبک واتساپ: وقتی کاربر دارد تاریخچه را می‌خواند (دور از
+  // انتهای چت است)، پیام‌های تازه به‌جای درج در لیست (که باعث پرش می‌شد) اینجا
+  // صف می‌شوند؛ با لمس «N پیام جدید» یا ارسال پیام، یکجا با انیمیشن اضافه می‌شوند.
+  final List<Message> _pendingIncoming = [];
+  int get pendingIncomingCount => _pendingIncoming.length;
+  /// صفحه وقتی دور از انتهای لیست است این فلگ را true می‌گذارد
+  bool holdIncoming = false;
   bool _loadingHistory = false;
   bool _historyDone = false;
   bool _sending = false;
@@ -57,6 +73,12 @@ class ChatController extends ChangeNotifier {
   final Map<String, Timer> _groupTyping = {};
   Set<String> get typingUsers => _groupTyping.keys.toSet();
 
+  // v1.1.0 — member role map (owner / admin) for coloured author tags.
+  final Map<String, RoomMember> _memberMap = {};
+  RoomMember? memberOf(String username) => _memberMap[username];
+  bool isOwner(String username) => _memberMap[username]?.isOwner ?? false;
+  bool isAdmin(String username) => _memberMap[username]?.isRoomAdmin ?? false;
+
   // v1.0.6: room meta from /api/room/<id>/messages (can_post, room_type…).
   bool _canPost = true;
   bool get canPost => _canPost;
@@ -65,6 +87,9 @@ class ChatController extends ChangeNotifier {
   // v1.0.9 — my role in this room ('owner' | 'admin' | 'member')
   String _myRole = 'member';
   String get myRole => _myRole;
+  // v1.2.1 — slow mode (seconds between messages) from room settings
+  int _slowMode = 0;
+  int get slowMode => _slowMode;
 
   // v1.0.6: socket status drives the header "connecting…" state.
   SocketStatus _socketStatus = SocketStatus.disconnected;
@@ -113,7 +138,77 @@ class ChatController extends ChangeNotifier {
 
   String get socketRoom => kind == ChatKind.pv ? 'pv_$chatId' : roomId;
 
-  StreamSubscription? _subNew, _subNewPv, _subTyping, _subOnline, _subDel, _subStatus, _subUserOn, _subUserOff, _subReactions, _subEdited;
+  StreamSubscription? _subNew, _subNewPv, _subTyping, _subOnline, _subDel, _subStatus, _subUserOn, _subUserOff, _subReactions, _subEdited, _subPins;
+  // v1.1.0 — PV seen-tick poller (cancelled on dispose)
+  Timer? _seenTimer;
+
+  // ==================== v1.1.1 — SERVER-side pins (Telegram) ====================
+  // Multiple pinned messages per chat, stored on the backend:
+  //  • rooms  → shared with every member (admins/owner pin)
+  //  • pv     → personal (each side has its own list)
+  // The pinned bar cycles through the list on tap; live updates arrive via
+  // 'room_pins_update' / 'pv_pins_update' socket events.
+  List<Map<String, dynamic>> _pins = const [];
+  int _pinCursor = 0;
+  List<Map<String, dynamic>> get pins => _pins;
+  int get pinCursor => _pinCursor;
+
+  bool get canPin {
+    if (kind == ChatKind.pv) return chatId > 0;
+    if (kind == ChatKind.general) return false;
+    return _myRole == 'owner' || _myRole == 'admin';
+  }
+
+  Map<String, dynamic>? get currentPin {
+    if (_pins.isEmpty) return null;
+    return _pins[_pinCursor.clamp(0, _pins.length - 1)];
+  }
+
+  Future<void> loadPins() async {
+    final res = kind == ChatKind.pv
+        ? await ApiService.I.pvPins(chatId)
+        : kind == ChatKind.general
+            ? const ApiResult<List<Map<String, dynamic>>>(ApiStatus.ok, data: [])
+            : await ApiService.I.roomPins(roomId);
+    if (_disposed || !res.ok || res.data == null) return;
+    _pins = res.data!;
+    if (_pinCursor >= _pins.length) _pinCursor = 0;
+    notifyListeners();
+  }
+
+  void cyclePin() {
+    if (_pins.length < 2) return;
+    _pinCursor = (_pinCursor + 1) % _pins.length;
+    notifyListeners();
+  }
+
+  Future<bool> pinMessage(Message m) async {
+    if (m.id <= 0 || !canPin) return false;
+    final res = kind == ChatKind.pv
+        ? await ApiService.I.pinPvMessage(chatId, m.id)
+        : await ApiService.I.pinRoomMessage(roomId, m.id);
+    if (res.ok) await loadPins();
+    return res.ok;
+  }
+
+  Future<bool> unpinMessage(int messageId) async {
+    final res = kind == ChatKind.pv
+        ? await ApiService.I.unpinPvMessage(chatId, messageId)
+        : await ApiService.I.unpinRoomMessage(roomId, messageId);
+    if (res.ok) await loadPins();
+    return res.ok;
+  }
+
+  // v1.1.1 — belt & braces with the server's auto-read: whenever a new room
+  // message lands while the chat is OPEN, re-tell the backend "I've read it".
+  // (The server ALSO advances reads for socket-room viewers itself.)
+  Timer? _readPing;
+  void _pingRoomRead() {
+    if (kind != ChatKind.group && kind != ChatKind.channel) return;
+    if (_readPing?.isActive == true) return;
+    _readPing = Timer(const Duration(milliseconds: 2500), () {});
+    SocketService.I.emit('group_read', {'room_id': roomId});
+  }
 
   // ------------------------------------------------ lifecycle
 
@@ -140,27 +235,93 @@ class ChatController extends ChangeNotifier {
         _memberCount = j['member_count'] is int
             ? j['member_count'] as int
             : int.tryParse('${j['member_count']}') ?? 0;
-        _memberUsernames = ((j['members'] as List?) ?? const [])
-            .whereType<Map>()
-            .map((e) => '${e['username'] ?? ''}')
-            .where((u) => u.isNotEmpty)
-            .toList();
+        _ingestMembers(j);
         _recountGroupOnline();
+        // v1.2.1 — slow mode from the room settings block
+        final st = j['settings'];
+        if (st is Map) {
+          _slowMode = st['slow_mode'] is int
+              ? st['slow_mode'] as int
+              : int.tryParse('${st['slow_mode']}') ?? 0;
+        }
         notifyListeners();
       });
     }
+
+    // 1d) v1.1.0 — keep PV read-ticks alive while the chat is open: a quiet
+    // periodic refresh of the tail merges is_read without touching anything.
+    if (kind == ChatKind.pv && chatId > 0) {
+      _seenTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+        if (_disposed) return;
+        pollPvSeen();
+      });
+    }
+
+    // 1d) v1.1.1 — server-side pinned messages
+    loadPins();
 
     // 2) instant disk cache
     final cached = CacheService.I.getSync(cacheKey);
     if (cached != null && cached.isNotEmpty) {
       _messages
         ..clear()
-        ..addAll(cached.map(Message.fromCache).where((m) => !m.pending));
+        ..addAll(cached.map(Message.fromCache).where((m) => !m.pending && _keep(m)));
       notifyListeners();
     }
 
     // 3) network history
     await refresh();
+  }
+
+  /// v1.1.0 — parse the members array of a roomInfo payload once.
+  void _ingestMembers(Map<String, dynamic> j) {
+    final list = (j['members'] as List?) ?? const [];
+    _memberMap.clear();
+    _memberUsernames = list
+        .whereType<Map>()
+        .map((e) {
+          final m = RoomMember.fromMap(Map<String, dynamic>.from(e));
+          _memberMap[m.username] = m;
+          return m.username;
+        })
+        .where((u) => u.isNotEmpty)
+        .toList();
+  }
+
+  /// v1.1.0 — REAL-TIME seen ticks: quietly refresh the tail of a PV and
+  /// merge ONLY the is_read flags (no list churn, no scroll jumps).
+  Future<void> pollPvSeen() async {
+    if (kind != ChatKind.pv || chatId <= 0) return;
+    final res = await ApiService.I.pvMessages(chatId, limit: 30);
+    if (_disposed || !res.ok || res.data == null) return;
+    var changed = false;
+    for (final fresh in res.data!) {
+      if (!fresh.isMe) continue;
+      final i = _messages.indexWhere((m) => m.id == fresh.id);
+      if (i >= 0 && !_messages[i].isRead && fresh.isRead) {
+        _messages[i] = _messages[i].copyWith(isRead: true);
+        changed = true;
+      }
+    }
+    if (changed) {
+      _persist();
+      notifyListeners();
+    }
+  }
+
+  /// v1.1.0 — jump-to-reply support: page backwards until [targetId] is in
+  /// memory (max ~15 pages ≈ 600 messages), so old replies always resolve.
+  Future<bool> loadUntilMessage(int targetId) async {
+    if (targetId <= 0) return false;
+    for (var guard = 0; guard < 15; guard++) {
+      if (_disposed) return false;
+      if (_messages.any((m) => m.id == targetId)) return true;
+      if (_historyDone || _loadingHistory) return false;
+      final before = _messages.length;
+      await loadOlder();
+      if (_messages.length == before) return false; // no progress
+    }
+    return _messages.any((m) => m.id == targetId);
   }
 
   Future<void> refresh() async {
@@ -180,7 +341,7 @@ class ChatController extends ChangeNotifier {
         res = await ApiService.I.roomMessages(roomId, limit: 60);
     }
     if (res.ok && res.data != null) {
-      final fresh = res.data!;
+      final fresh = res.data!.where(_keep).toList();
       // Preserve pending/failed optimistic messages at the tail.
       final tail = _messages.where((m) => m.pending || m.failed).toList();
       _messages
@@ -191,7 +352,7 @@ class ChatController extends ChangeNotifier {
           _messages.add(t);
         }
       }
-      _historyDone = fresh.length < 60;
+      _historyDone = res.data!.length < 60;
       _error = null;
       _persist();
       historyLoaded = true;
@@ -242,6 +403,14 @@ class ChatController extends ChangeNotifier {
 
   Future<void> loadOlder() async {
     if (_loadingHistory || _historyDone || _messages.isEmpty) return;
+    // v1.2.0 — CASCADE FIX: the scroll anchor keeps the viewport pinned at
+    // the top edge after every prepend, and the programmatic jumpTo re-fires
+    // the scroll listener → pages were chained back-to-back until the very
+    // first message (the "stutters and loads everything" bug on weak phones).
+    // A hard cooldown breaks the chain: one page per user gesture max.
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (nowMs - _lastOlderLoadMs < 900) return;
+    _lastOlderLoadMs = nowMs;
     _loadingHistory = true;
     notifyListeners();
     final oldest = _messages.first.id;
@@ -251,15 +420,26 @@ class ChatController extends ChangeNotifier {
       _ => await ApiService.I.roomMessages(roomId, before: oldest, limit: 40),
     };
     if (res.ok && res.data != null) {
-      if (res.data!.isNotEmpty) {
-        _messages.insertAll(0, res.data!);
+      final older = res.data!.where(_keep).toList();
+      if (older.isNotEmpty) {
+        _messages.insertAll(0, older);
+        justLoadedOlder = true; // v1.2.0 — screen freezes viewport for prepends
         _persist();
       }
+      // v1.2.0 — an empty page means there is nothing older: stop asking.
       if (res.data!.length < 40) _historyDone = true;
+    } else {
+      // network hiccup → do not hammer; require a fresh user scroll
+      _lastOlderLoadMs = DateTime.now().millisecondsSinceEpoch;
     }
     _loadingHistory = false;
     notifyListeners();
   }
+
+  /// v1.2.0 — set when a history page just landed; the screen reads it to
+  /// distinguish "prepend" (freeze viewport) from "append" (slide-in).
+  int _lastOlderLoadMs = 0;
+  bool justLoadedOlder = false;
 
   // ------------------------------------------------ socket
 
@@ -288,9 +468,18 @@ class ChatController extends ChangeNotifier {
       }
     });
     _subNewPv = sock.onNewPvMessage.listen((d) {
-      if (kind == ChatKind.pv) _onIncoming(d);
-      if (d['private_chat_id'] != null &&
-          '${d['private_chat_id']}' == '$chatId') {
+      // v1.4.0 CRITICAL FIX — باگ بحرانی «قاطی شدن چت‌ها و پیوی‌ها»:
+      // سوکتِ اپ بعد از هر ری‌کانکت به «همه‌ی» پیوی‌هایی که قبلا باز شده‌اند
+      // دوباره join می‌شود (_joinedPv). پس ایونت new_pv_message از چت A هم
+      // می‌تواند وقتی چت B باز است برسد؛ قبلاً بدون چک، پیامِ چت A داخل
+      // چت B درج می‌شد! الان فقط پیام همان چتِ باز نمایش داده می‌شود؛
+      // پیام چت‌های دیگر فقط پیش‌نمایش لیست را آپدیت می‌کند (سرور هم از
+      // v1.4.0 ایونت‌های پیوی را فقط به دو طرف خود چت می‌فرستد).
+      final incomingChat = '${d['private_chat_id'] ?? ''}';
+      if (kind == ChatKind.pv && incomingChat == '$chatId') {
+        _onIncoming(d);
+      }
+      if (incomingChat == '$chatId') {
         // also mark read when we are inside this pv
         sock.markPvAllRead(chatId);
       }
@@ -389,6 +578,17 @@ class ChatController extends ChangeNotifier {
       _persist();
       notifyListeners();
     });
+    // v1.1.1 — live pin updates for THIS chat only
+    _subPins = sock.onPinsUpdate.listen((d) {
+      if (kind == ChatKind.general) return;
+      final rid = '${d['room_id'] ?? ''}';
+      final cid = '${d['chat_id'] ?? ''}';
+      final mine = kind == ChatKind.pv ? '$chatId' : roomId;
+      if ((kind == ChatKind.pv && cid == mine) ||
+          (kind != ChatKind.pv && rid == mine)) {
+        loadPins();
+      }
+    });
     _subReactions = sock.onReactionUpdate.listen((d) {
       final id = (d['message_id'] is int)
           ? d['message_id'] as int
@@ -428,9 +628,31 @@ class ChatController extends ChangeNotifier {
       }
     }
     final msg = Message.fromSocket(d, ApiService.I.cachedUsername);
+    if (!_keep(msg)) return;
     // de-dup by id
     if (msg.id > 0 && _messages.any((m) => m.id == msg.id)) return;
+    // v1.4.0 — ضدپرش واتساپی: دور از انتهای چت؟ پیام به صف میرود، لیست ثابت می‌ماند
+    if (holdIncoming && !msg.isMe) {
+      if (_pendingIncoming.any((m) => m.id == msg.id)) return;
+      _pendingIncoming.add(msg);
+      notifyListeners();
+      return;
+    }
     _messages.add(msg);
+    _persist();
+    // v1.1.1 — keep the read-state pinned to the newest message while open
+    _pingRoomRead();
+    notifyListeners();
+  }
+
+  /// v1.4.0 — تخلیه‌ی صف پیام‌های نگه‌داشته‌شده (لمس پیل «پیام جدید» یا ارسال پیام)
+  void flushIncoming() {
+    if (_pendingIncoming.isEmpty) return;
+    for (final m in _pendingIncoming) {
+      if (m.id > 0 && _messages.any((x) => x.id == m.id)) continue;
+      _messages.add(m);
+    }
+    _pendingIncoming.clear();
     _persist();
     notifyListeners();
   }
@@ -449,12 +671,33 @@ class ChatController extends ChangeNotifier {
     if (m.replyToId != null && m.replyToId!.isNotEmpty) {
       payload['reply_to'] = int.tryParse(m.replyToId!) ?? m.replyToId;
     }
+    // v1.2.1 — Telegram-style media metadata travels WITH the message so
+    // receivers get dims / music tags without decoding the file first.
+    // v1.3.1 — audio ALWAYS carries an explicit kind (voice | music) so the
+    // server stores it and the bubble type can never be "guessed" again.
+    final meta = <String, dynamic>{};
+    if (m.fileType == 'audio') {
+      meta['kind'] = m.isVoiceNote ? 'voice' : 'music';
+    }
+    if (m.isVoiceNote) meta['kind'] = 'voice';
+    if (m.mediaDurMs > 0) meta['dur'] = m.mediaDurMs;
+    if (m.mediaW > 0 && m.mediaH > 0) {
+      meta['w'] = m.mediaW;
+      meta['h'] = m.mediaH;
+    }
+    if (m.mediaTitle.isNotEmpty) meta['title'] = m.mediaTitle;
+    if (m.mediaArtist.isNotEmpty) meta['artist'] = m.mediaArtist;
+    if (m.mediaCover.isNotEmpty) meta['cover'] = m.mediaCover;
+    if (meta.isNotEmpty) payload['media_meta'] = meta;
     return payload;
   }
 
   Future<bool> send(String text, {String? replyToId, String? replyAuthor, String? replyText}) async {
     final trimmed = text.trim();
     if (trimmed.isEmpty || _sending) return false;
+    // v1.4.0 — ارسال یعنی برگشت به انتهای چت: صفِ پیام‌های جدید اول تخلیه شود
+    holdIncoming = false;
+    flushIncoming();
     final now = DateTime.now();
     final cmid = 'm_${now.millisecondsSinceEpoch}';
     final msg = Message(
@@ -510,6 +753,10 @@ class ChatController extends ChangeNotifier {
     final idx = _messages.indexWhere((m) => m.clientMsgId == cmid);
     if (idx >= 0) {
       final m = _messages[idx];
+      // v1.3.2 — merge the server echo's media_meta (the echo carries the
+      // normalized kind/music tags) so a song is a MUSIC bubble from the
+      // optimistic frame until forever — never a temporary voice bubble.
+      final mm = Message.parseMediaMeta(d['media_meta']);
       _messages[idx] = Message(
         id: realId,
         clientMsgId: cmid,
@@ -531,7 +778,21 @@ class ChatController extends ChangeNotifier {
         isPro: d['is_pro'] == true,
         isOfficial: d['is_official'] == true,
         adminTitle: '${d['admin_title'] ?? ''}',
+        isOwner: d['sender_is_owner'] == true,
         seenCount: m.seenCount,
+        // v1.2.1 — keep the local media metadata (dims/music tags)
+        // v1.3.2 — prefer the server echo's values when present
+        localPath: m.localPath,
+        fileSize: m.fileSize,
+        mediaW: mm.w > 0 ? mm.w : m.mediaW,
+        mediaH: mm.h > 0 ? mm.h : m.mediaH,
+        mediaTitle: mm.title.isNotEmpty ? mm.title : m.mediaTitle,
+        mediaArtist: mm.artist.isNotEmpty ? mm.artist : m.mediaArtist,
+        mediaCover: mm.cover.isNotEmpty ? mm.cover : m.mediaCover,
+        mediaDurMs: mm.durMs > 0 ? mm.durMs : m.mediaDurMs,
+        isVoiceNote: mm.voice || m.isVoiceNote,
+        isMusicKind: mm.music || m.isMusicKind,
+        albumId: m.albumId,
       );
       _persist();
       notifyListeners();
@@ -614,18 +875,43 @@ class ChatController extends ChangeNotifier {
   ///  1. optimistic bubble with the LOCAL file + file size
   ///  2. upload with real progress → ring updates live (like Telegram)
   ///  3. swap to the remote URL and emit over the socket
+  /// v1.1.0 — [albumId] groups several photos into ONE rendered bubble.
+  /// v1.2.1 — Telegram media metadata: image dims kill the send-jump; music
+  /// tags (title/artist/cover) power the dedicated music bubble; voice notes
+  /// carry their real duration.
   Future<bool> sendMedia(String filePath,
       {required String fileType,
       String caption = '',
       String? replyToId,
       String? replyAuthor,
-      String? replyText}) async {
+      String? replyText,
+      String albumId = '',
+      bool isVoiceNote = false,
+      int durationMs = 0,
+      String mediaTitle = '',
+      String mediaArtist = '',
+      String mediaCover = '',
+      int mediaWidth = 0,
+      int mediaHeight = 0}) async {
+    // v1.4.0 — ارسال مدیا هم یعنی برگشت به انتهای چت
+    holdIncoming = false;
+    flushIncoming();
     final now = DateTime.now();
     final cmid = 'm_${now.millisecondsSinceEpoch}';
     int size = 0;
     try {
       size = File(filePath).lengthSync();
     } catch (_) {}
+    // Telegram reserves the photo aspect BEFORE the upload starts — decode
+    // the header synchronously-ish so the bubble never shifts on first paint.
+    var w = mediaWidth, h = mediaHeight;
+    if ((fileType == 'image') && (w == 0 || h == 0)) {
+      try {
+        final d = await _decodeImageSize(filePath);
+        w = d.$1;
+        h = d.$2;
+      } catch (_) {}
+    }
     final msg = Message(
       id: 0,
       clientMsgId: cmid,
@@ -640,6 +926,14 @@ class ChatController extends ChangeNotifier {
       fileType: fileType,
       isMe: true,
       pending: true,
+      albumId: albumId,
+      isVoiceNote: isVoiceNote,
+      mediaDurMs: durationMs,
+      mediaTitle: mediaTitle,
+      mediaArtist: mediaArtist,
+      mediaCover: mediaCover,
+      mediaW: w,
+      mediaH: h,
       replyToId: replyToId,
       replyAuthor: replyAuthor,
       replyText: replyText,
@@ -650,28 +944,49 @@ class ChatController extends ChangeNotifier {
     _persist();
 
     // Upload with live progress (throttled UI updates).
-    DateTime lastTick = DateTime.now();
+    final token = TransferCancelToken();
+    UploadRegistry.tokens[cmid] = token;
+    DateTime lastTick = DateTime.fromMillisecondsSinceEpoch(0);
     final res = await ApiService.I.uploadMediaWithProgress(filePath,
-        fileType: fileType, onProgress: (pct) {
+        fileType: fileType,
+        cancel: token,
+        onBytes: (sent, total) {
       final n = DateTime.now();
-      final done = pct >= 1.0;
-      if (!done && n.difference(lastTick).inMilliseconds < 120) return;
+      if (n.difference(lastTick).inMilliseconds < 100) return;
       lastTick = n;
       final idx = _messages.indexWhere((m) => m.clientMsgId == cmid);
-      if (idx >= 0) {
-        _messages[idx] = _messages[idx].copyWith(uploadPct: pct);
+      if (idx >= 0 && !_disposed) {
+        _messages[idx] = _messages[idx].copyWith(
+            uploadPct: total > 0 ? (sent / total).clamp(0.0, 0.99) : 0,
+            uploadSent: sent);
         notifyListeners();
       }
     });
+    UploadRegistry.tokens.remove(cmid);
+    if (token.isCancelled) {
+      // کاربر ✕ زد: حباب بی‌سروصدا حذف می‌شود (نه «ناموفق»)
+      _messages.removeWhere((m) => m.clientMsgId == cmid);
+      _sending = _messages.any((m) => m.pending);
+      if (!_disposed) {
+        _persist();
+        notifyListeners();
+      }
+      return false;
+    }
     _sending = false;
     if (!_disposed && res.ok && res.data != null) {
       final url = res.data!['file_url'] ?? '';
       if (url.isEmpty) return false;
       final idx = _messages.indexWhere((m) => m.clientMsgId == cmid);
       if (idx >= 0) {
+        // v1.3.2 — localPath is KEPT after the upload: the bubble keeps
+        // painting the local file and crossfades to the remote URL only
+        // when it has decoded (chat_bubbles [smoothConfirm]) — the sent
+        // photo/GIF no longer flashes a placeholder at confirm time.
+        // (localPath is never persisted to the message cache, so leaving
+        // the chat and coming back shows the pure remote copy.)
         _messages[idx] = _messages[idx].copyWith(
           fileUrl: url,
-          localPath: '',
           uploadPct: 0,
         );
         _persist();
@@ -693,19 +1008,38 @@ class ChatController extends ChangeNotifier {
     return false;
   }
 
-  /// Animated delete (v1.0.6): collapse + fade first, then really remove —
-  /// mirrors the smooth removal of the web version.
+  /// v1.2.1 — image pixel size via dart:ui ImageDescriptor: parses ONLY the
+  /// container header (no full decode) → exact w/h in a couple of ms.
+  static Future<(int, int)> _decodeImageSize(String path) async {
+    final bytes = await File(path).readAsBytes();
+    final buf = await ui.ImmutableBuffer.fromUint8List(bytes);
+    try {
+      final desc = await ui.ImageDescriptor.encoded(buf);
+      final r = (desc.width, desc.height);
+      desc.dispose();
+      return r;
+    } finally {
+      buf.dispose();
+    }
+  }
+
+  /// Animated delete (v1.0.6 → v1.1.0 FIXED): collapse + fade first, then
+  /// really remove.
+  /// v1.1.0 CRITICAL FIX: the old matcher
+  ///   `x.clientMsgId == m.clientMsgId || (m.id > 0 && x.id == m.id)`
+  /// matched EVERY network message when m.clientMsgId was '' (server rows
+  /// have no client id) → deleting ONE message wiped the whole list.
   void deleteOwn(Message m) {
     if (m.id > 0) SocketService.I.deleteMessage(m.id);
-    final idx = _messages.indexWhere(
-        (x) => x.clientMsgId == m.clientMsgId || (m.id > 0 && x.id == m.id));
+    bool matches(Message x) =>
+        m.id > 0 ? x.id == m.id : m.clientMsgId.isNotEmpty && x.clientMsgId == m.clientMsgId;
+    final idx = _messages.indexWhere(matches);
     if (idx < 0) return;
     _messages[idx] = _messages[idx].copyWith(removing: true);
     notifyListeners();
     Timer(const Duration(milliseconds: 240), () {
       if (_disposed) return;
-      _messages.removeWhere(
-          (x) => x.clientMsgId == m.clientMsgId || (m.id > 0 && x.id == m.id));
+      _messages.removeWhere(matches);
       _persist();
       notifyListeners();
     });
@@ -777,6 +1111,9 @@ class ChatController extends ChangeNotifier {
   Future<bool> sendGif(String gifUrl, {String? replyToId, String? replyAuthor, String? replyText}) async {
     final url = gifUrl.trim();
     if (url.isEmpty || _sending) return false;
+    // v1.4.0 — ارسال گیف هم یعنی برگشت به انتهای چت
+    holdIncoming = false;
+    flushIncoming();
     final now = DateTime.now();
     final cmid = 'm_${now.millisecondsSinceEpoch}';
     final msg = Message(
@@ -832,11 +1169,7 @@ class ChatController extends ChangeNotifier {
     _memberCount = j['member_count'] is int
         ? j['member_count'] as int
         : int.tryParse('${j['member_count']}') ?? 0;
-    _memberUsernames = ((j['members'] as List?) ?? const [])
-        .whereType<Map>()
-        .map((e) => '${e['username'] ?? ''}')
-        .where((u) => u.isNotEmpty)
-        .toList();
+    _ingestMembers(j);
     _recountGroupOnline();
     notifyListeners();
   }
@@ -844,6 +1177,16 @@ class ChatController extends ChangeNotifier {
   // ------------------------------------------------ cache
 
   void _persist() {
+    // v1.1.1 — DEBOUNCED disk write: history pagination used to jsonEncode
+    // the whole tail on every page, which stuttered the UI thread on weak
+    // phones. Coalesce the writes instead.
+    _persistTimer?.cancel();
+    _persistTimer = Timer(const Duration(milliseconds: 700), _doPersist);
+  }
+
+  Timer? _persistTimer;
+
+  void _doPersist() {
     if (_messages.isEmpty) return;
     // Keep only the most recent 200 messages on disk (fast + bounded).
     final slice = _messages.length > 200
@@ -858,6 +1201,10 @@ class ChatController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _typingTimer?.cancel();
+    _seenTimer?.cancel();
+    _readPing?.cancel();
+    _persistTimer?.cancel();
+    _doPersist(); // v1.1.1 — flush the coalesced cache write on close
     for (final t in _groupTyping.values) {
       t.cancel();
     }
@@ -870,6 +1217,7 @@ class ChatController extends ChangeNotifier {
     _subUserOn?.cancel();
     _subUserOff?.cancel();
     _subReactions?.cancel();
+    _subPins?.cancel();
     switch (kind) {
       case ChatKind.general:
         SocketService.I.leaveGeneral();

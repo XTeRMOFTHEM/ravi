@@ -1,8 +1,10 @@
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart' as ip;
 
 import '../../core/api_service.dart';
 import '../../core/app_state.dart';
@@ -11,6 +13,7 @@ import '../../core/constants.dart';
 import '../../core/i18n.dart';
 import '../../core/models.dart';
 import '../../core/socket_service.dart';
+import '../chat/photo_viewer.dart';
 import '../widgets/common.dart';
 import '../widgets/ravi_alerts.dart';
 import 'user_profile_screen.dart';
@@ -32,7 +35,7 @@ class GroupInfoScreen extends StatefulWidget {
   final String roomId;
   const GroupInfoScreen({super.key, required this.roomId});
 
-  static Route route(String roomId) => PageRouteBuilder(
+  static Route<int> route(String roomId) => PageRouteBuilder(
         transitionDuration: const Duration(milliseconds: 240),
         reverseTransitionDuration: const Duration(milliseconds: 200),
         pageBuilder: (_, __, ___) => GroupInfoScreen(roomId: roomId),
@@ -239,13 +242,15 @@ class _GroupInfoScreenState extends State<GroupInfoScreen>
     );
   }
 
-  // ================= stretching cover =================
+  // ================= stretching cover (v1.1.0 — Telegram profile) =================
+  // Collapsed: the round avatar rides the app bar. Scrolling up EXPANDS it
+  // smoothly into a big circle over a blurred cover, with the member /
+  // subscriber count floating below — exactly like a Telegram group profile.
   Widget _coverBar(Palette p, S s) {
     final dark = Theme.of(context).brightness == Brightness.dark;
-    final zoom = 1.0 + 0.8 * _stretch;
     final online = _info!.members.where((m) => _onlineNow(m.username)).length;
     return SliverAppBar(
-      expandedHeight: 250 + 40 * _stretch,
+      expandedHeight: 268 + 40 * _stretch,
       pinned: true,
       stretch: true,
       stretchTriggerOffset: 90,
@@ -258,96 +263,303 @@ class _GroupInfoScreenState extends State<GroupInfoScreen>
             () => Navigator.of(context).pop())),
       ),
       actions: [
-        if (_canManage)
+        // v1.1.0 — the EYE: jump to the picked media inside the chat
+        if (_mediaSelecting && _pickedMedia.isNotEmpty)
+          _glassBtn(context, Icons.remove_red_eye_outlined, () {
+            Navigator.of(context).pop(_pickedMedia.first);
+          }),
+        if (_mediaSelecting)
+          _glassBtn(context, Icons.close_rounded, () {
+            setState(() {
+              _mediaSelecting = false;
+              _pickedMedia.clear();
+            });
+          }),
+        if (_isOwner && !_mediaSelecting)
+          _glassBtn(context, Icons.edit_rounded, () => _editProfileSheet(p, s)),
+        if (_canManage && !_mediaSelecting)
           _glassBtn(context, Icons.settings_rounded, () => _manageSheet(p, s)),
         const SizedBox(width: 8),
       ],
       flexibleSpace: LayoutBuilder(
         builder: (ctx, cons) {
-          return FlexibleSpaceBar(
-            stretchModes: const [
-              StretchMode.zoomBackground,
-              StretchMode.blurBackground,
-            ],
-            background: Stack(
-              fit: StackFit.expand,
-              children: [
-                // the photo — fills the whole cover and zooms on stretch
-                Transform.scale(
-                  scale: zoom,
-                  child: _avatarImg(p, full: true),
-                ),
-                // bottom readability scrim
-                Positioned(
-                  left: 0, right: 0, bottom: 0,
-                  child: Container(
-                    height: 120,
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Colors.transparent,
-                          Colors.black.withValues(alpha: .45),
-                        ],
+          // 0 = collapsed (app bar only) … 1 = fully expanded
+          final maxH = cons.maxHeight;
+          final minH = (cons.maxHeight - cons.maxWidth) < 0 ? 0.0 : 0.0;
+          final t = ((maxH - 56 - minH) / (268 - 56)).clamp(0.0, 1.0);
+          final smooth = Curves.easeOutCubic.transform(t);
+          final avatarSize = 34 + 62 * smooth;
+          final hasPhoto = _info!.avatar.isNotEmpty &&
+              !_info!.avatar.contains('default.png');
+          final coverUrl = hasPhoto
+              ? ApiService.I.avatarUrl(_info!.avatar)
+              : '';
+
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              // blurred live cover behind (only when expanded)
+              if (coverUrl.isNotEmpty)
+                Opacity(
+                  opacity: .25 + .3 * smooth,
+                  child: ImageFiltered(
+                    imageFilter: ImageFilter.blur(
+                        sigmaX: 18 - 8 * smooth, sigmaY: 18 - 8 * smooth),
+                    child: Transform.scale(
+                      scale: 1.25 + 0.8 * _stretch,
+                      child: CachedNetworkImage(
+                        imageUrl: coverUrl,
+                        fit: BoxFit.cover,
+                        memCacheWidth: 480,
+                        httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                        errorWidget: (_, __, ___) => const SizedBox.shrink(),
                       ),
                     ),
                   ),
+                )
+              else
+                Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: C.avatarGradients[0],
+                    ),
+                  ),
                 ),
-                // name + counts on a glass pill pinned near the photo bottom
-                Positioned(
-                  left: 0, right: 0, bottom: 42,
-                  child: Center(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(18),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 9),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: .30),
-                            borderRadius: BorderRadius.circular(18),
-                            border: Border.all(
-                                color: Colors.white.withValues(alpha: .28)),
+              // readability scrim
+              Positioned(
+                left: 0, right: 0, bottom: 0,
+                child: Container(
+                  height: 130,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Colors.transparent,
+                        (dark ? const Color(0xE6101418) : const Color(0xF7FFFFFF))
+                            .withValues(alpha: .85),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              // centered circle avatar + name + counts
+              Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    // the avatar itself — grows smoothly with the scroll
+                    Transform.scale(
+                      scale: 1.0 + 0.8 * _stretch,
+                      child: Container(
+                        width: avatarSize,
+                        height: avatarSize,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: dark ? const Color(0xFF232A32) : p.bgSoft,
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: .8),
+                            width: 2.4,
                           ),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(_info!.name,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                      fontSize: 16 + 4 * _stretch,
-                                      fontWeight: FontWeight.w800,
-                                      color: Colors.white)),
-                              const SizedBox(height: 2),
-                              Text(
-                                _isChannel
-                                    ? s.subscribersCount(_info!.memberCount)
-                                    : s.membersWithOnline(
-                                        _info!.memberCount, online),
-                                style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w600,
-                                    color: Colors.white.withValues(alpha: .85)),
-                              ),
-                            ],
-                          ),
+                          boxShadow: const [
+                            BoxShadow(
+                                color: Color(0x3314283C),
+                                blurRadius: 18,
+                                offset: Offset(0, 8)),
+                          ],
+                        ),
+                        child: ClipOval(
+                          child: hasPhoto
+                              ? CachedNetworkImage(
+                                  imageUrl: coverUrl,
+                                  fit: BoxFit.cover,
+                                  memCacheWidth: 240,
+                                  httpHeaders: {
+                                    'Cookie': ApiService.I.cookieHeader
+                                  },
+                                  errorWidget: (_, __, ___) => Center(
+                                    child: Text(
+                                      _info!.name.isEmpty
+                                          ? '?'
+                                          : _info!.name[0].toUpperCase(),
+                                      style: TextStyle(
+                                          fontSize: avatarSize * .34,
+                                          fontWeight: FontWeight.w900,
+                                          color: p.accent),
+                                    ),
+                                  ),
+                                )
+                              : Center(
+                                  child: Text(
+                                    _info!.name.isEmpty
+                                        ? '?'
+                                        : _info!.name[0].toUpperCase(),
+                                    style: TextStyle(
+                                        fontSize: avatarSize * .34,
+                                        fontWeight: FontWeight.w900,
+                                        color: p.accent),
+                                  ),
+                                ),
                         ),
                       ),
                     ),
-                  ),
+                    // name + counts fade in as the header expands
+                    Opacity(
+                      opacity: smooth,
+                      child: Column(
+                        children: [
+                          const SizedBox(height: 10),
+                          Text(_info!.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  fontSize: 17,
+                                  fontWeight: FontWeight.w900,
+                                  color: p.text)),
+                          const SizedBox(height: 3),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 11, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: p.accentSoft,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              _isChannel
+                                  ? s.subscribersCount(_info!.memberCount)
+                                  : s.membersWithOnline(
+                                      _info!.memberCount, online),
+                              style: TextStyle(
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w800,
+                                  color: p.accent),
+                            ),
+                          ),
+                          // v1.2.1 — THE USERNAME / LINK ROW (Telegram):
+                          // public rooms show their @handle and the invite
+                          // link as copyable chips right under the counts —
+                          // the user could never find the group username/link
+                          // before.
+                          if (_info!.username.trim().isNotEmpty ||
+                              _info!.inviteLink.trim().isNotEmpty) ...[
+                            const SizedBox(height: 8),
+                            Opacity(
+                              opacity: smooth,
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 16),
+                                child: Wrap(
+                                  alignment: WrapAlignment.center,
+                                  spacing: 7,
+                                  runSpacing: 6,
+                                  children: [
+                                    if (_info!.username.trim().isNotEmpty)
+                                      _infoChip(
+                                        p,
+                                        icon: Icons.alternate_email_rounded,
+                                        label:
+                                            '@${_info!.username.trim()}',
+                                        onTap: () async {
+                                          await Clipboard.setData(
+                                              ClipboardData(
+                                                  text:
+                                                      '@${_info!.username.trim()}'));
+                                          if (mounted) {
+                                            showGlassToast(context,
+                                                AppState.I.str.copied,
+                                                icon: Icons
+                                                    .alternate_email_rounded);
+                                          }
+                                        },
+                                      ),
+                                    if (_info!.inviteLink.trim().isNotEmpty)
+                                      _infoChip(
+                                        p,
+                                        icon: Icons.link_rounded,
+                                        label: _info!.inviteLink.trim(),
+                                        onTap: () async {
+                                          await Clipboard.setData(
+                                              ClipboardData(
+                                                  text: _info!
+                                                      .inviteLink
+                                                      .trim()));
+                                          if (mounted) {
+                                            showGlassToast(context,
+                                                AppState.I.str.copied,
+                                                icon: Icons.link_rounded);
+                                          }
+                                        },
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                          // v1.2.0 — Telegram shows the short bio/link right
+                          // under the name in the expanded info header.
+                          if (_info!.bio.trim().isNotEmpty) ...[
+                            const SizedBox(height: 7),
+                            Opacity(
+                              opacity: smooth,
+                              child: ConstrainedBox(
+                                constraints:
+                                    const BoxConstraints(maxWidth: 280),
+                                child: Text(_info!.bio.trim(),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    textAlign: TextAlign.center,
+                                    textDirection: bidiDirectionOf(
+                                        _info!.bio.trim()),
+                                    style: TextStyle(
+                                        fontSize: 12,
+                                        height: 1.35,
+                                        color: p.text2)),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
+              ),
+            ],
           );
         },
       ),
     );
   }
 
+  /// v1.2.1 — small glass chip used for @username / invite-link in the
+  /// expanded header (tap → copy).
+  Widget _infoChip(Palette p, {required IconData icon, required String label, required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: p.bgCard,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: p.borderSoft),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 12, color: p.accent),
+          const SizedBox(width: 5),
+          Text(label,
+              textDirection: TextDirection.ltr,
+              style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: p.text2)),
+        ]),
+      ),
+    );
+  }
+
   final Set<String> _liveOnline = {};
+
+  // v1.1.0 — media selection + "jump to message in chat" (the eye button)
+  bool _mediaSelecting = false;
+  final Set<int> _pickedMedia = {};
 
   bool _onlineNow(String username) {
     SocketService.I;
@@ -397,8 +609,28 @@ class _GroupInfoScreenState extends State<GroupInfoScreen>
       itemBuilder: (ctx, i) {
         final m = _media[i];
         final url = ApiService.I.absoluteUrl(m.fileUrl);
+        final picked = _pickedMedia.contains(m.id);
         return GestureDetector(
-          onTap: () {},
+          onTap: () {
+            // v1.1.0 — tap opens the media viewer; in select mode it toggles
+            if (_mediaSelecting) {
+              setState(() {
+                picked
+                    ? _pickedMedia.remove(m.id)
+                    : _pickedMedia.add(m.id);
+              });
+              return;
+            }
+            openMediaViewer(context,
+                fileUrl: m.fileUrl, title: _info!.name, isVideo: m.isVideo);
+          },
+          onLongPress: () {
+            HapticFeedback.selectionClick();
+            setState(() {
+              _mediaSelecting = true;
+              _pickedMedia.add(m.id);
+            });
+          },
           child: ClipRRect(
             borderRadius: BorderRadius.circular(4),
             child: Stack(fit: StackFit.expand, children: [
@@ -668,6 +900,207 @@ class _GroupInfoScreenState extends State<GroupInfoScreen>
         ),
       ]),
     );
+  }
+
+  // ================= v1.1.1 — edit room profile (photo / name / bio) =================
+  Future<void> _editProfileSheet(Palette p, S s) async {
+    final nameCtl = TextEditingController(text: _info!.name);
+    final bioCtl = TextEditingController(text: _info!.bio);
+    String? pickedPath;
+    var busy = false;
+    final changed = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setSt) {
+        final dark = Theme.of(ctx).brightness == Brightness.dark;
+        final hasPhoto = (pickedPath != null) ||
+            (_info!.avatar.isNotEmpty &&
+                !_info!.avatar.contains('default.png'));
+        return Padding(
+          padding: EdgeInsets.only(
+              bottom: MediaQuery.of(ctx).viewInsets.bottom),
+          child: Container(
+            margin: const EdgeInsets.all(10),
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+            decoration: BoxDecoration(
+              color: dark ? const Color(0xFF171C22) : Colors.white,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: p.border),
+            ),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text(s.editRoomProfile,
+                  style: TextStyle(
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w800,
+                      color: p.text)),
+              const SizedBox(height: 14),
+              // ---- avatar (tap → gallery pick → instant upload on save) ----
+              GestureDetector(
+                onTap: busy
+                    ? null
+                    : () async {
+                        try {
+                          final f = await ip.ImagePicker().pickImage(
+                              source: ip.ImageSource.gallery,
+                              maxWidth: 1024,
+                              imageQuality: 88);
+                          if (f != null) setSt(() => pickedPath = f.path);
+                        } catch (_) {}
+                      },
+                child: Stack(children: [
+                  Container(
+                    width: 84,
+                    height: 84,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: hasPhoto || pickedPath != null
+                          ? null
+                          : LinearGradient(
+                              colors: C.avatarGradients[0].toList()),
+                      color: pickedPath == null
+                          ? (hasPhoto ? null : p.bgSoft)
+                          : null,
+                    ),
+                    child: ClipOval(
+                      child: pickedPath != null
+                          ? Image.file(File(pickedPath!),
+                              fit: BoxFit.cover)
+                          : hasPhoto
+                              ? CachedNetworkImage(
+                                  imageUrl:
+                                      ApiService.I.avatarUrl(_info!.avatar),
+                                  fit: BoxFit.cover,
+                                  memCacheWidth: 240,
+                                  httpHeaders: {
+                                    'Cookie': ApiService.I.cookieHeader
+                                  },
+                                )
+                              : Center(
+                                  child: Text(
+                                      _info!.name.isEmpty
+                                          ? '?'
+                                          : _info!.name[0].toUpperCase(),
+                                      style: TextStyle(
+                                          fontSize: 28,
+                                          fontWeight: FontWeight.w900,
+                                          color: p.accent))),
+                    ),
+                  ),
+                  PositionedDirectional(
+                    bottom: 0,
+                    end: 0,
+                    child: Container(
+                      width: 26,
+                      height: 26,
+                      decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: p.accent,
+                          border: Border.all(color: Colors.white, width: 1.6)),
+                      child: const Icon(Icons.photo_camera_rounded,
+                          size: 13, color: Colors.white),
+                    ),
+                  ),
+                ]),
+              ),
+              const SizedBox(height: 6),
+              Text(s.changePhotoHint,
+                  style: TextStyle(fontSize: 10.5, color: p.text3)),
+              const SizedBox(height: 14),
+              // ---- name ----
+              TextField(
+                controller: nameCtl,
+                maxLength: 60,
+                style: TextStyle(fontSize: 13.5, color: p.text),
+                decoration: InputDecoration(
+                  labelText: s.roomNameLabel,
+                  counterText: '',
+                  filled: true,
+                  fillColor: p.bgSoft,
+                  labelStyle: TextStyle(fontSize: 11.5, color: p.text3),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide.none),
+                ),
+              ),
+              const SizedBox(height: 8),
+              // ---- bio ----
+              TextField(
+                controller: bioCtl,
+                maxLines: 3,
+                maxLength: 512,
+                style: TextStyle(fontSize: 13, color: p.text, height: 1.45),
+                decoration: InputDecoration(
+                  labelText: s.roomBioLabel,
+                  counterText: '',
+                  filled: true,
+                  fillColor: p.bgSoft,
+                  labelStyle: TextStyle(fontSize: 11.5, color: p.text3),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide.none),
+                ),
+              ),
+              const SizedBox(height: 14),
+              GestureDetector(
+                onTap: busy
+                    ? null
+                    : () async {
+                        setSt(() => busy = true);
+                        var okAll = true;
+                        if (pickedPath != null) {
+                          final r = await ApiService.I.setRoomAvatar(
+                              widget.roomId, pickedPath!);
+                          if (!r.ok) okAll = false;
+                        }
+                        final newName = nameCtl.text.trim();
+                        if (newName.isNotEmpty && newName != _info!.name) {
+                          final r =
+                              await ApiService.I.renameRoom(widget.roomId, newName);
+                          if (!r.ok) okAll = false;
+                        }
+                        final newBio = bioCtl.text.trim();
+                        if (newBio != _info!.bio) {
+                          final r =
+                              await ApiService.I.setRoomBio(widget.roomId, newBio);
+                          if (!r.ok) okAll = false;
+                        }
+                        if (ctx.mounted) Navigator.of(ctx).pop(okAll);
+                      },
+                child: Container(
+                  height: 46,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(colors: [
+                      p.accent,
+                      p.accent.withValues(alpha: .8)
+                    ]),
+                    borderRadius: BorderRadius.circular(15),
+                  ),
+                  child: busy
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white))
+                      : Text(s.save,
+                          style: const TextStyle(
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w800,
+                              color: Colors.white)),
+                ),
+              ),
+            ]),
+          ),
+        );
+      }),
+    );
+    if (changed == true && mounted) {
+      showGlassToast(context, AppState.I.str.roomProfileSaved,
+          icon: Icons.check_circle_outline_rounded,
+          color: const Color(0xFF22C55E));
+      await _load();
+    }
   }
 
   // ================= manage sheet (owner/admin) =================

@@ -68,6 +68,7 @@ class MessageActionPanel {
     VoidCallback? onForward,
     VoidCallback? onDelete,
     VoidCallback? onSelect,
+    VoidCallback? onPin,
     required ValueChanged<String> onReact,
   }) {
     HapticFeedback.mediumImpact();
@@ -85,7 +86,7 @@ class MessageActionPanel {
       final size = MediaQuery.of(context).size;
       const panelWidth = 218.0;
       // vertical placement: prefer above the bubble, else below
-      final itemCount = 3 + (onEdit != null ? 1 : 0) + (onForward != null ? 1 : 0) + (onSaveGif != null ? 1 : 0) + (onDelete != null ? 1 : 0);
+      final itemCount = 3 + (onEdit != null ? 1 : 0) + (onForward != null ? 1 : 0) + (onSaveGif != null ? 1 : 0) + (onPin != null ? 1 : 0) + (onDelete != null ? 1 : 0);
       final panelHeight = 62 + itemCount * 42.0;
       final top = anchorRect.top - panelHeight - 10 > MediaQuery.of(context).padding.top
           ? anchorRect.top - panelHeight - 8
@@ -105,6 +106,9 @@ class MessageActionPanel {
           _PanelItem(Icons.copy_rounded, s.copy, dark ? Colors.white : const Color(0xFF334155), onCopy),
         if (onForward != null)
           _PanelItem(Icons.shortcut_rounded, s.forward, const Color(0xFF38BDF8), onForward!),
+        // v1.1.0 — Telegram-style pin
+        if (onPin != null)
+          _PanelItem(Icons.push_pin_rounded, s.pinMessage, const Color(0xFFF59E0B), onPin!),
         if (onSaveGif != null)
           _PanelItem(Icons.save_alt_rounded, s.saveGif, const Color(0xFF38BDF8), onSaveGif!),
         // v1.0.9 — multi-select entry point (Telegram)

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
@@ -7,13 +8,17 @@ import 'api_service.dart';
 
 /// One playing item for the whole app (voice note or music file).
 class PlayingItem {
-  final String url; // absolute or /static/... path
+  final String url; // /static/... path
   final String title;
   final String subtitle;
   final bool isVoice;
-  /// Voice → sender avatar path; music → '' (artwork unsupported server-side)
+  /// Voice → sender avatar path; music → '' 
   final String avatarPath;
   final String messageIdTag; // dedupe key (fileUrl)
+  // v1.2.1 — music fields + offline playback
+  final String artist;
+  final String coverUrl; // remote cover art
+  final String localPath; // cached file → play from disk (Telegram)
 
   const PlayingItem({
     required this.url,
@@ -22,6 +27,9 @@ class PlayingItem {
     required this.isVoice,
     this.avatarPath = '',
     required this.messageIdTag,
+    this.artist = '',
+    this.coverUrl = '',
+    this.localPath = '',
   });
 
   @override
@@ -97,7 +105,12 @@ class PlayerService extends ChangeNotifier {
     _dur = Duration.zero;
     notifyListeners();
     try {
-      await _player!.play(UrlSource(ApiService.I.absoluteUrl(item.url)));
+      // v1.2.1 — Telegram plays from the cached file when available
+      final hasLocal = item.localPath.isNotEmpty && File(item.localPath).existsSync();
+      final src = hasLocal
+          ? DeviceFileSource(item.localPath)
+          : UrlSource(ApiService.I.absoluteUrl(item.url));
+      await _player!.play(src);
       await _player!.setReleaseMode(ReleaseMode.stop);
       await _player!.setPlaybackRate(_speed);
       _playing = true;

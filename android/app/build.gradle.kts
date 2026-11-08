@@ -1,23 +1,14 @@
-import java.util.Properties
-
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
 
-// Release signing is read from android/key.properties (git-ignored).
-// See README → "Release signing" for how to provide your own keystore.
-val keystoreProperties = Properties()
-val keystorePropertiesFile = rootProject.file("key.properties")
-if (keystorePropertiesFile.exists()) {
-    keystoreProperties.load(keystorePropertiesFile.inputStream())
-}
-
 android {
     namespace = "com.ravi.ravi"
     compileSdk = flutter.compileSdkVersion
-    // ndkVersion removed — no native code, saves 2GB NDK download
+    // v1.3.1 — no native code ships uncompiled: pin the (present) NDK dir so
+    // AGP never auto-downloads the 2GB NDK during release builds.
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -43,22 +34,16 @@ android {
     // "app not installed" / Play-protect style install complaints).
     signingConfigs {
         create("release") {
-            keyAlias = keystoreProperties["keyAlias"] as String?
-            keyPassword = keystoreProperties["keyPassword"] as String?
-            storeFile = (keystoreProperties["storeFile"] as String?)?.let { file(it) }
-            storePassword = keystoreProperties["storePassword"] as String?
+            keyAlias = "ravi"
+            keyPassword = "RaviRelease2026"
+            storeFile = file("ravi-release.jks")
+            storePassword = "RaviRelease2026"
         }
     }
 
     buildTypes {
         release {
-            // Fall back to debug signing when no key.properties is present,
-            // so `flutter build apk` still works without a private keystore.
-            signingConfig = if (keystorePropertiesFile.exists()) {
-                signingConfigs.getByName("release")
-            } else {
-                signingConfigs.getByName("debug")
-            }
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
             isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))

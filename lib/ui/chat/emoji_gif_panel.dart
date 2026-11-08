@@ -8,17 +8,27 @@ import 'gif_picker_sheet.dart';
 
 /// v1.0.8 — ONE panel for emoji + GIF (Telegram-style): a compact bottom
 /// tab bar switches between the emoji keyboard and the GIF library grid.
-/// Replaces both the old emoji-only panel and the standalone GIF sheet.
+///
+/// v1.3.1 — LAG FIX + JUMP FIX:
+///  • the panel's height now equals the REMEMBERED KEYBOARD HEIGHT, so
+///    switching keyboard ⇄ panel keeps every pixel in place (WhatsUp logic);
+///  • both tabs live in an IndexedStack → the emoji grid is built ONCE and
+///    keeps its scroll position (tab switching is instant, no re-layout);
+///  • the EmojiPicker's ScrollController is a real State field (it used to
+///    be re-created on every build → state loss + jank).
 class EmojiGifPanel extends StatefulWidget {
   final Palette palette;
   final TextEditingController? emojiController;
   final ValueChanged<String> onGifPicked;
+  /// v1.3.1 — height == remembered keyboard height (clamped for sanity).
+  final double height;
 
   const EmojiGifPanel({
     super.key,
     required this.palette,
     this.emojiController,
     required this.onGifPicked,
+    this.height = 300,
   });
 
   @override
@@ -27,24 +37,34 @@ class EmojiGifPanel extends StatefulWidget {
 
 class _EmojiGifPanelState extends State<EmojiGifPanel> {
   int _tab = 0; // 0 = emoji, 1 = gif
+  late final ScrollController _emojiScroll =
+      ScrollController(keepScrollOffset: true);
+  late final ScrollController _gifScroll =
+      ScrollController(keepScrollOffset: true);
+
+  @override
+  void dispose() {
+    _emojiScroll.dispose();
+    _gifScroll.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final p = widget.palette;
     final s = AppState.I.str;
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 180),
-      height: 300,
+    return Container(
+      height: widget.height,
       decoration: BoxDecoration(
         color: p.chatHeadBg,
         border: Border(top: BorderSide(color: p.chatHeadBorder)),
       ),
       child: Column(children: [
         // ---- tab bar ----
-        Container(
+        SizedBox(
           height: 42,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
           child: Row(children: [
+            const SizedBox(width: 10),
             _tabBtn(
                 icon: Icons.emoji_emotions_outlined,
                 label: s.emojiTab,
@@ -59,40 +79,53 @@ class _EmojiGifPanelState extends State<EmojiGifPanel> {
           ]),
         ),
         Divider(height: 1, color: p.chatHeadBorder),
-        // ---- body ----
+        // ---- body (IndexedStack: both tabs stay ALIVE → zero re-build lag,
+        // scroll positions survive tab flips) ----
         Expanded(
-          child: _tab == 0
-              ? EmojiPicker(
-                  textEditingController: widget.emojiController,
-                  scrollController: ScrollController(),
-                  config: Config(
-                    emojiViewConfig: EmojiViewConfig(
-                      columns: 8,
-                      emojiSizeMax: 28,
-                      backgroundColor: Colors.transparent,
-                    ),
-                    categoryViewConfig: CategoryViewConfig(
-                      indicatorColor: p.accent,
-                      iconColorSelected: p.accent,
-                      backgroundColor: Colors.transparent,
-                      iconColor: p.text3,
-                    ),
-                    skinToneConfig: const SkinToneConfig(),
-                    bottomActionBarConfig:
-                        const BottomActionBarConfig(enabled: false),
-                    searchViewConfig: SearchViewConfig(
-                      backgroundColor: p.bgSoft,
-                      hintText: '',
-                    ),
-                    viewOrderConfig: const ViewOrderConfig(),
-                  ),
-                )
-              : GifPickerGrid(
-                  onPicked: widget.onGifPicked,
-                  compact: true,
-                ),
+          child: IndexedStack(
+            index: _tab,
+            children: [
+              _emojiTab(p),
+              GifPickerGrid(
+                onPicked: widget.onGifPicked,
+                compact: true,
+                scrollController: _gifScroll,
+              ),
+            ],
+          ),
         ),
       ]),
+    );
+  }
+
+  Widget _emojiTab(Palette p) {
+    // EmojiPicker needs a bounded height — inside IndexedStack/Expanded the
+    // viewport is the panel body; a plain ListView inside works, but the
+    // package wants an explicit viewport fraction for the grid density.
+    final cols = widget.height > 330 ? 9 : 8;
+    return EmojiPicker(
+      textEditingController: widget.emojiController,
+      scrollController: _emojiScroll,
+      config: Config(
+        emojiViewConfig: EmojiViewConfig(
+          columns: cols,
+          emojiSizeMax: 28,
+          backgroundColor: Colors.transparent,
+        ),
+        categoryViewConfig: CategoryViewConfig(
+          indicatorColor: p.accent,
+          iconColorSelected: p.accent,
+          backgroundColor: Colors.transparent,
+          iconColor: p.text3,
+        ),
+        skinToneConfig: const SkinToneConfig(),
+        bottomActionBarConfig: const BottomActionBarConfig(enabled: false),
+        searchViewConfig: SearchViewConfig(
+          backgroundColor: p.bgSoft,
+          hintText: '',
+        ),
+        viewOrderConfig: const ViewOrderConfig(),
+      ),
     );
   }
 

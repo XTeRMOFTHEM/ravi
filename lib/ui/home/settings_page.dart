@@ -2,16 +2,20 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart' as image_picker;
 
+import '../../core/account_manager.dart';
 import '../../core/api_service.dart';
 import '../../core/app_state.dart';
 import '../../core/chat_bg.dart';
 import '../../core/constants.dart';
 import '../../core/i18n.dart';
+import '../../core/models.dart';
 import '../../core/socket_service.dart';
 import '../auth/auth_screen.dart';
 import '../widgets/common.dart';
 import '../widgets/ravi_alerts.dart';
+import 'accounts_sheet.dart';
 import 'contacts_page.dart';
+import 'data_storage_screen.dart';
 
 /// Settings page — 1:1 with index.html `page-settings`:
 /// Appearance / Account / Notifications & Sound / Privacy / About groups.
@@ -128,6 +132,14 @@ class _SettingsPageState extends State<SettingsPage>
         // ---------------- Account ----------------
         _groupLabel(p, s.grpAccount),
         SectionCard(children: [
+          // v1.4.0 — چندحسابی: سوییچر تلگرامی
+          ListRow(
+            icon: Icons.manage_accounts_rounded,
+            title: s.accounts,
+            sub: s.switchAccount,
+            trailing: _activeAccountTrailing(p),
+            onTap: () => AccountsSheet.show(context),
+          ),
           ListRow(
             icon: Icons.person_outline_rounded,
             title: s.myAccount,
@@ -197,6 +209,18 @@ class _SettingsPageState extends State<SettingsPage>
         ]),
 
         // ---------------- About ----------------
+        // ---------------- v1.1.0 — Data and Storage ----------------
+        _groupLabel(p, s.dataStorageTitle),
+        SectionCard(children: [
+          ListRow(
+            icon: Icons.donut_small_rounded,
+            title: s.dataStorageTitle,
+            sub: s.dataStorageSub,
+            onTap: () => Navigator.of(context, rootNavigator: true)
+                .push(MaterialPageRoute(builder: (_) => const DataStorageScreen())),
+          ),
+        ]),
+
         _groupLabel(p, s.grpAbout),
         SectionCard(children: [
           ListRow(icon: Icons.info_outline_rounded, title: s.aboutRavi, sub: s.aboutSub),
@@ -377,6 +401,31 @@ class _SettingsPageState extends State<SettingsPage>
     final me = ApiService.I.me();
     final name = me.name.isEmpty ? me.username : me.name;
     return '$name · @${me.username}';
+  }
+
+  /// v1.4.0 — چندحسابی: خلاصه‌ی حساب فعال (آواتار ۲۶ + @username) در انتهای ردیف «حساب‌ها».
+  /// به AppState.I.me گوش می‌دهد تا بعد از سوییچ حساب، خودش تازه شود.
+  Widget _activeAccountTrailing(Palette p) {
+    return ValueListenableBuilder<RaviUser>(
+      valueListenable: AppState.I.me,
+      builder: (context, me, _) {
+        final acc = AccountManager.I.active;
+        final name = acc != null && acc.name.isNotEmpty ? acc.name : me.name;
+        final avatar = acc?.avatar ?? '';
+        final username = acc != null && acc.username.isNotEmpty
+            ? acc.username
+            : me.username;
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            RaviAvatar(name: name, avatarPath: avatar, size: 26),
+            const SizedBox(width: 6),
+            Text('@$username',
+                style: TextStyle(fontSize: 10, color: p.text2)),
+          ],
+        );
+      },
+    );
   }
 
   Widget _groupLabel(Palette p, String label) {
@@ -1211,6 +1260,7 @@ class _WallpaperSheetState extends State<_WallpaperSheet> {
       final x = await image_picker.ImagePicker()
           .pickImage(source: image_picker.ImageSource.gallery,
               maxWidth: 1800, imageQuality: 85);
+      if (!mounted) return;
       if (x == null) {
         setState(() => _uploading = false);
         return;

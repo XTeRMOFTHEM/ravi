@@ -21,12 +21,15 @@ class GifPickerGrid extends StatefulWidget {
   final ValueChanged<String> onPicked;
   final bool compact; // embedded in the emoji panel → denser padding
   final bool showHeader; // upload button row (sheet mode)
+  // v1.3.1 — external controller (panel keeps the GIF tab alive)
+  final ScrollController? scrollController;
 
   const GifPickerGrid({
     super.key,
     required this.onPicked,
     this.compact = false,
     this.showHeader = false,
+    this.scrollController,
   });
 
   @override
@@ -55,7 +58,7 @@ class _GifPickerGridState extends State<GifPickerGrid> {
     final s = AppState.I.str;
     try {
       final x = await ImagePicker().pickVideo(source: ImageSource.gallery);
-      if (x == null) return;
+      if (x == null || !mounted) return;
       setState(() => _uploading = true);
       final res = await ApiService.I.uploadGif(x.path);
       if (!mounted) return;
@@ -197,13 +200,16 @@ class _GifPickerGridState extends State<GifPickerGrid> {
       );
     }
     return GridView.builder(
-      padding: EdgeInsets.fromLTRB(widget.compact ? 10 : 12, 8,
-          widget.compact ? 10 : 12, 14),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
-        mainAxisSpacing: 8,
-        crossAxisSpacing: 8,
-        childAspectRatio: 0.92,
+      controller: widget.scrollController,
+      padding: EdgeInsets.fromLTRB(widget.compact ? 8 : 12, 6,
+          widget.compact ? 8 : 12, 12),
+      // v1.1.0 — uniform tiles (Telegram): 2 wide columns inside the panel,
+      // 3 in the sheet — every GIF is exactly the same size now.
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: widget.compact ? 2 : 3,
+        mainAxisSpacing: 6,
+        crossAxisSpacing: 6,
+        childAspectRatio: widget.compact ? 1.5 : 1.25,
       ),
       itemCount: _gifs!.length,
       itemBuilder: (ctx, i) {
@@ -213,7 +219,7 @@ class _GifPickerGridState extends State<GifPickerGrid> {
           onTap: () => widget.onPicked('${gif['url']}'),
           onLongPress: () => _confirmDelete(gif),
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(10),
             child: Stack(
               fit: StackFit.expand,
               children: [
@@ -230,6 +236,26 @@ class _GifPickerGridState extends State<GifPickerGrid> {
                     errorWidget: (_, __, ___) => Icon(
                         Icons.broken_image_outlined,
                         size: 22, color: p.text3),
+                  ),
+                ),
+                // GIF badge (bottom-start, Telegram-style)
+                PositionedDirectional(
+                  bottom: 4,
+                  start: 4,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 5, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: .5),
+                      borderRadius: BorderRadius.circular(5),
+                    ),
+                    child: const Text('GIF',
+                        textDirection: TextDirection.ltr,
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 8,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: .5)),
                   ),
                 ),
                 // delete affordance

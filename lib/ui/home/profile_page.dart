@@ -12,6 +12,7 @@ import '../../core/i18n.dart';
 import '../../core/models.dart';
 import '../chat/photo_viewer.dart';
 import '../widgets/common.dart';
+import 'accounts_sheet.dart';
 import 'settings_page.dart';
 import 'user_profile_screen.dart';
 
@@ -108,11 +109,11 @@ class _ProfilePageState extends State<ProfilePage>
         physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
         padding: const EdgeInsets.only(bottom: 110),
         children: [
-          // ---------- cover ----------
+          // ---------- cover (v1.1.0 — compact, Telegram-like) ----------
           // v1.0.5: NO overlay shadow on the banner (user request) — the
           // cover renders clean in both light and dark mode.
           Container(
-            height: 300,
+            height: 216,
             width: double.infinity,
             color: p.pfCard,
             child: Stack(
@@ -136,15 +137,14 @@ class _ProfilePageState extends State<ProfilePage>
             ),
           ),
 
-          // ---------- header (avatar + name) ----------
+          // ---------- header (v1.1.0 — CENTERED, compact avatar) ----------
           Transform.translate(
-            offset: const Offset(0, -70),
+            offset: const Offset(0, -58),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
+              child: Column(
                 children: [
-                  // avatar + Pro frame (v1.0.7: 2× like the web .pp-frame)
+                  // avatar + Pro frame (compact — 88px, top-center)
                   GestureDetector(
                     onTap: () {
                       final url = ApiService.I.avatarUrl(avatarName);
@@ -152,72 +152,72 @@ class _ProfilePageState extends State<ProfilePage>
                         openMediaViewer(context, fileUrl: url, title: _username);
                       }
                     },
-                    child: FrameAvatar(
-                      key: ValueKey('fa-$_avatarBust'),
-                      name: displayName,
-                      avatarPath: avatarName,
-                      frameUrl: frameUrl,
-                      size: 120,
+                    child: Container(
+                      padding: const EdgeInsets.all(3),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: p.bg,
+                        boxShadow: const [
+                          BoxShadow(color: Color(0x2414283C), blurRadius: 16, offset: Offset(0, 6)),
+                        ],
+                      ),
+                      child: FrameAvatar(
+                        key: ValueKey('fa-$_avatarBust'),
+                        name: displayName,
+                        avatarPath: avatarName,
+                        frameUrl: frameUrl,
+                        size: 86,
+                        glow: false,
+                      ),
                     ),
                   ),
-                  SizedBox(width: frameUrl.isNotEmpty ? 34 : 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const SizedBox(height: 14),
-                        Row(
-                          children: [
-                            Flexible(
-                              child: Text(displayName,
-                                  maxLines: 1, overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                      fontSize: 20, fontWeight: FontWeight.w800,
-                                      color: p.pfName)),
-                            ),
-                            if (isVerified) ...[
-                              const SizedBox(width: 5),
-                              Icon(Icons.verified_rounded,
-                                  size: 17, color: const Color(0xFF38BDF8)),
-                            ],
-                            // v1.0.9 — the animated Pro star sits NEXT TO THE
-                            // NAME (like the blue check), never in the tags.
-                            if (isPro) ...[
-                              const SizedBox(width: 5),
-                              ProStarBadge(size: 19),
-                            ],
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Text('@$_username',
-                            style: TextStyle(fontSize: 14,
-                                fontWeight: FontWeight.w500, color: p.pfHandle)),
-                        const SizedBox(height: 7),
-                        if (isAdmin)
-                          Wrap(
-                            spacing: 6,
-                            runSpacing: 6,
-                            crossAxisAlignment: WrapCrossAlignment.center,
-                            children: [
-                              _chip(p, s.adminLabel, const Color(0xFFEF4444)),
-                            ],
-                          ),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Flexible(
+                        child: Text(displayName,
+                            maxLines: 1, overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontSize: 18.5, fontWeight: FontWeight.w800,
+                                color: p.pfName)),
+                      ),
+                      if (isVerified) ...[
+                        const SizedBox(width: 5),
+                        Icon(Icons.verified_rounded,
+                            size: 17, color: const Color(0xFF38BDF8)),
                       ],
-                    ),
+                      // v1.0.9 — the animated Pro star sits NEXT TO THE
+                      // NAME (like the blue check), never in the tags.
+                      if (isPro) ...[
+                        const SizedBox(width: 5),
+                        // v1.5.0 — لمس = تگ پرمیوم + توضیح قابلیت‌ها (انیمیشن ۸ ثانیه‌ای)
+                        PremiumProfileBadge(size: 19),
+                      ],
+                    ],
                   ),
+                  const SizedBox(height: 3),
+                  Text('@$_username',
+                      textDirection: TextDirection.ltr,
+                      style: TextStyle(fontSize: 13,
+                          fontWeight: FontWeight.w500, color: p.pfHandle)),
+                  if (isAdmin) ...[
+                    const SizedBox(height: 8),
+                    _chip(p, s.adminLabel, const Color(0xFFEF4444)),
+                  ],
                 ],
               ),
             ),
           ),
 
-          // ---------- stats (real values) ----------
+          // ---------- stats (real values, tappable) ----------
           Transform.translate(
-            offset: const Offset(0, -50),
+            offset: const Offset(0, -44),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               child: Row(
                 children: [
-                  _stat(p, '0', s.posts),
+                  _statTap(p, '0', s.posts, null),
                   _divider(p),
                   _statTap(p, '$followers', s.followers, () => _openFollowList(true)),
                   _divider(p),
@@ -229,12 +229,12 @@ class _ProfilePageState extends State<ProfilePage>
 
           // ---------- bio card (real bio) ----------
           Transform.translate(
-            offset: const Offset(0, -38),
+            offset: const Offset(0, -32),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Container(
                 width: double.infinity,
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
                   color: p.pfCard,
                   borderRadius: BorderRadius.circular(16),
@@ -250,14 +250,15 @@ class _ProfilePageState extends State<ProfilePage>
                         ],
                       )
                     : Text(bio.isEmpty ? s.noBio : bio,
-                        style: TextStyle(fontSize: 14, height: 1.6, color: p.text)),
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 13.5, height: 1.6, color: p.text)),
               ),
             ),
           ),
 
           // ---------- tabs ----------
           Transform.translate(
-            offset: const Offset(0, -26),
+            offset: const Offset(0, -20),
             child: Column(
               children: [
                 TabBar(
@@ -326,6 +327,14 @@ class _ProfilePageState extends State<ProfilePage>
                     sub: s.blockedUsersSub,
                     trailing: Icon(Icons.chevron_right_rounded, size: 17, color: p.text3),
                     onTap: _openBlockedSheet,
+                  ),
+                  // v1.4.0 — چندحسابی: سوییچر حساب‌ها
+                  ListRow(
+                    icon: Icons.manage_accounts_rounded,
+                    title: s.accounts,
+                    sub: s.switchAccount,
+                    trailing: Icon(Icons.chevron_right_rounded, size: 17, color: p.text3),
+                    onTap: () => AccountsSheet.show(context),
                   ),
                   ListRow(
                     icon: Icons.logout_rounded,
@@ -429,7 +438,7 @@ class _ProfilePageState extends State<ProfilePage>
     );
   }
 
-  Widget _statTap(Palette p, String value, String label, VoidCallback onTap) {
+  Widget _statTap(Palette p, String value, String label, VoidCallback? onTap) {
     return Expanded(
       child: InkWell(
         onTap: onTap,
@@ -579,7 +588,7 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
       final picker = ip.ImagePicker();
       final x = await picker.pickImage(
           source: ip.ImageSource.gallery, maxWidth: 1024, imageQuality: 85);
-      if (x == null) return;
+      if (x == null || !mounted) return;
       setState(() => _avatarPath = x.path);
     } catch (_) {}
   }

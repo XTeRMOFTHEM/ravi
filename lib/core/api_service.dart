@@ -4,8 +4,10 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+import 'storage_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'account_manager.dart';
 import 'constants.dart';
 import 'identity_parser.dart';
 import 'models.dart';
@@ -64,6 +66,19 @@ class CookieJar {
       await p.remove(_kKey);
     } catch (_) {}
   }
+
+  /// v1.4.0 — چندحسابی: ست کردن مستقیم کوکی یک حساب ذخیره‌شده (سوییچ حساب)
+  Future<void> setRaw(String cookieHeader) async {
+    _cookie = cookieHeader.trim();
+    try {
+      final p = await SharedPreferences.getInstance();
+      if (_cookie.isEmpty) {
+        await p.remove(_kKey);
+      } else {
+        await p.setString(_kKey, _cookie);
+      }
+    } catch (_) {}
+  }
 }
 
 enum ApiStatus { ok, unauthorized, error, networkError }
@@ -93,7 +108,9 @@ class ApiService {
     // TCP connect for 12-20s under load; 12s aborted healthy connects.
     inner.connectionTimeout = const Duration(seconds: 25);
     inner.badCertificateCallback = ((cert, host, port) => false);
-    _client = IOClient(inner);
+    // v1.1.0 — traffic counter for the Data & Storage panel (Telegram-style
+    // "how much data did the app use"): every API byte passes through here.
+    _client = _CountingClient(IOClient(inner));
     try {
       final p = await SharedPreferences.getInstance();
       _cachedUsername = p.getString(_kUsernameKey) ?? '';
@@ -376,6 +393,46 @@ class ApiService {
     }
   }
 
+  /// v1.4.0 — سیو مسیج: گرفتن/ساخت چت «پیام‌های ذخیره‌شده» (چت با خود کاربر)
+  Future<int?> savedChat() async {
+    try {
+      final r = await _client
+          .get(Uri.parse('$kBaseUrl/api/saved_chat'), headers: _headers)
+          .timeout(const Duration(seconds: 12));
+      _absorb(r);
+      if (r.statusCode == 200 && _isJsonBody(r)) {
+        final j = jsonDecode(utf8.decode(r.bodyBytes));
+        final id = j is Map ? (j['chat_id'] is int ? j['chat_id'] as int : int.tryParse('${j['chat_id']}')) : null;
+        return (id != null && id > 0) ? id : null;
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// v1.4.0 — خلاصه‌ی هویت کاربر لاگین‌شده (برای مدیریت چندحسابی)
+  Future<Map<String, dynamic>?> meSummary() async {
+    try {
+      final r = await _client
+          .get(Uri.parse('$kBaseUrl/'), headers: _headers)
+          .timeout(const Duration(seconds: 12));
+      _absorb(r);
+      if (r.statusCode == 200) {
+        _applyIdentity(utf8.decode(r.bodyBytes, allowMalformed: true));
+        return {
+          'username': cachedUsername,
+          'name': cachedName,
+          'avatar': cachedAvatar,
+          'id': cachedUserId,
+        };
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// General chat history with pagination.
   Future<ApiResult<List<Message>>> generalMessages({int before = 0, int limit = 60}) async {
     try {
@@ -505,19 +562,25 @@ class ApiService {
   }
 
   /// Upload a chat media file. CRITICAL v1.0.5 FIX: the multipart field name
-  /// MUST be `image` (backend: request.files['image']) — the old code sent
-  /// `file`, so the server answered 400 "فایلی انتخاب نشده" and nothing
-  /// could ever be sent. Allowed: jpg png gif webp mp4 webm mp3 ogg m4a.
-  Future<ApiResult<Map<String, dynamic>>> uploadMedia(String filePath,
-      {String fileType = 'image'}) async {
+  /// MUST be `image` (backend: request.files['image']).
+  /// v1.3.1 — ROBUST UPLOADS: the timeout now scales with the file size
+  /// (a 50 MB video on 3G used to die at the fixed 90 s mark = "upload
+  /// nashod"), and the SERVER's Persian error text (فرمت/حجم) is surfaced
+  /// on the failed bubble instead of a generic "upload failed".
+  Duration _uploadTimeout(String filePath) {
+    var bytes = 0;
     try {
-      final req = http.MultipartRequest('POST', Uri.parse('$kBaseUrl/upload_image'))
-        ..files.add(await http.MultipartFile.fromPath('image', filePath))
-        ..headers.addAll(_headers);
-      final streamed = await _client.send(req).timeout(const Duration(seconds: 90));
-      final resp = await http.Response.fromStream(streamed);
-      _absorb(resp);
-      if (resp.statusCode == 200) {
+      bytes = File(filePath).lengthSync();
+    } catch (_) {}
+    // ~ 45 s base + 1 s per 40 KB, capped at 10 minutes.
+    final secs = (45 + (bytes / (40 * 1024)).ceil()).clamp(60, 600);
+    return Duration(seconds: secs);
+  }
+
+  ApiResult<Map<String, dynamic>> _uploadResult(http.Response resp, String fileType) {
+    _absorb(resp);
+    if (resp.statusCode == 200) {
+      try {
         final j = jsonDecode(utf8.decode(resp.bodyBytes));
         if (j is Map && (j['file_url'] ?? j['url']) != null) {
           return ApiResult(ApiStatus.ok, data: {
@@ -528,8 +591,31 @@ class ApiService {
         if (j is Map && j['error'] != null) {
           return ApiResult(ApiStatus.error, message: '${j['error']}');
         }
+      } catch (_) {}
+    } else {
+      try {
+        final j = jsonDecode(utf8.decode(resp.bodyBytes));
+        if (j is Map && j['error'] != null) {
+          return ApiResult(ApiStatus.error, message: '${j['error']}');
+        }
+      } catch (_) {}
+      if (resp.statusCode == 413) {
+        return const ApiResult(ApiStatus.error,
+            message: 'حجم فایل بیش از حد مجاز است');
       }
-      return const ApiResult(ApiStatus.error, message: 'upload failed');
+    }
+    return const ApiResult(ApiStatus.error, message: 'upload failed');
+  }
+
+  Future<ApiResult<Map<String, dynamic>>> uploadMedia(String filePath,
+      {String fileType = 'image'}) async {
+    try {
+      final req = http.MultipartRequest('POST', Uri.parse('$kBaseUrl/upload_image'))
+        ..files.add(await http.MultipartFile.fromPath('image', filePath))
+        ..headers.addAll(_headers);
+      final streamed = await _client.send(req).timeout(_uploadTimeout(filePath));
+      final resp = await http.Response.fromStream(streamed);
+      return _uploadResult(resp, fileType);
     } catch (e) {
       return ApiResult(ApiStatus.networkError, message: '$e');
     }
@@ -545,34 +631,29 @@ class ApiService {
   Future<ApiResult<Map<String, dynamic>>> uploadMediaWithProgress(
       String filePath,
       {String fileType = 'image',
-      void Function(double pct)? onProgress}) async {
+      void Function(double pct)? onProgress,
+      void Function(int sent, int total)? onBytes,
+      TransferCancelToken? cancel}) async {
     try {
       final req = _ProgressMultipartRequest('POST', Uri.parse('$kBaseUrl/upload_image'),
+          cancel: cancel,
           onProgress: (sent, total) {
-        if (total > 0 && onProgress != null) {
-          onProgress((sent / total).clamp(0.0, 1.0));
+        if (total > 0) {
+          // 0.99 سقف تا وقتی پاسخ سرور نیامده «۱۰۰٪ تمام‌شده» نشان داده نشود
+          onProgress?.call((sent / total).clamp(0.0, 0.99));
+          onBytes?.call(sent, total);
         }
       })
         ..files.add(await http.MultipartFile.fromPath('image', filePath))
         ..headers.addAll(_headers);
-      final streamed = await _client.send(req).timeout(const Duration(seconds: 120));
+      final streamed = await _client.send(req).timeout(_uploadTimeout(filePath));
       final resp = await http.Response.fromStream(streamed);
-      _absorb(resp);
       onProgress?.call(1.0);
-      if (resp.statusCode == 200) {
-        final j = jsonDecode(utf8.decode(resp.bodyBytes));
-        if (j is Map && (j['file_url'] ?? j['url']) != null) {
-          return ApiResult(ApiStatus.ok, data: {
-            'file_url': '${j['file_url'] ?? j['url']}',
-            'file_type': fileType,
-          });
-        }
-        if (j is Map && j['error'] != null) {
-          return ApiResult(ApiStatus.error, message: '${j['error']}');
-        }
-      }
-      return const ApiResult(ApiStatus.error, message: 'upload failed');
+      return _uploadResult(resp, fileType);
     } catch (e) {
+      if (cancel?.isCancelled == true || e is TransferCancelled) {
+        return const ApiResult(ApiStatus.error, message: 'cancelled');
+      }
       return ApiResult(ApiStatus.networkError, message: '$e');
     }
   }
@@ -609,6 +690,15 @@ class ApiService {
   String get cachedAvatar => _cachedAvatar;
   String get cachedName => _cachedName.isEmpty ? _cachedUsername : _cachedName;
   String get cachedChatBg => _cachedChatBg;
+  /// v1.4.0 — ست مستقیم هویت کش‌شده (برای سوییچ چندحسابی بدون درخواست شبکه)
+  void applyIdentityDirect({required String username, required String name, required String avatar, required int id}) {
+    _cachedUsername = username;
+    _cachedName = name;
+    _cachedAvatar = avatar;
+    _cachedUserId = id;
+    _persistIdentity();
+  }
+
   String get cookieHeader => jar.header;
   void setIdentity({required String username, int id = 0, String avatar = '', String name = ''}) {
     if (username.isNotEmpty) _cachedUsername = username;
@@ -624,6 +714,10 @@ class ApiService {
     _cachedUserId = 0;
     _cachedAvatar = '';
     _cachedName = '';
+    // v1.4.0 — حساب از لیست چندحسابی هم حذف شود
+    try {
+      await AccountManager.I.removeAt(AccountManager.I.activeIndex);
+    } catch (_) {}
     try {
       final p = await SharedPreferences.getInstance();
       await p.remove(_kUsernameKey);
@@ -634,6 +728,50 @@ class ApiService {
     try {
       await _client.get(Uri.parse('$kBaseUrl/logout'), headers: _headers).timeout(const Duration(seconds: 8));
     } catch (_) {}
+  }
+
+  /// دانلود استریمی با درصد + بایت‌ها (مثل تلگرام) و قابلیت لغو.
+  Future<bool> downloadToFileWithProgress(
+      String urlOrPath, String savePath, void Function(double pct) onProgress,
+      {void Function(int received, int total)? onBytes,
+      TransferCancelToken? cancel}) async {
+    IOSink? sink;
+    try {
+      final url = urlOrPath.startsWith('http')
+          ? urlOrPath
+          : absoluteUrl(urlOrPath);
+      final req = http.Request('GET', Uri.parse(url))..headers.addAll(_headers);
+      final resp = await _client.send(req).timeout(const Duration(seconds: 30));
+      if (resp.statusCode != 200) return false;
+      final total = resp.contentLength ?? 0;
+      sink = File(savePath).openWrite();
+      var received = 0;
+      var last = DateTime.fromMillisecondsSinceEpoch(0);
+      await for (final chunk in resp.stream) {
+        if (cancel?.isCancelled == true) throw const TransferCancelled();
+        received += chunk.length;
+        sink.add(chunk);
+        final now = DateTime.now();
+        if (now.difference(last).inMilliseconds >= 100) {
+          last = now;
+          if (total > 0) onProgress((received / total).clamp(0.0, 0.99));
+          onBytes?.call(received, total);
+        }
+      }
+      await sink.flush();
+      await sink.close();
+      sink = null;
+      onBytes?.call(received, total > 0 ? total : received);
+      onProgress(1.0);
+      return true;
+    } catch (_) {
+      try { await sink?.close(); } catch (_) {}
+      try {
+        final f = File(savePath);
+        if (await f.exists()) await f.delete();
+      } catch (_) {}
+      return false;
+    }
   }
 
   String absoluteUrl(String path) {
@@ -1114,6 +1252,30 @@ class ApiService {
 
   Future<ApiResult<bool>> saveAvatarFrame(String frameKey) =>
       _postProForm('/save_avatar_frame', {'frame': frameKey});
+
+  /// v1.5.0 — بانک قاب‌های پروفایل مستقیم از سرور (GET /api/frames):
+  /// [{key, name, url}] — قاب جدید بدون آپدیت اپ به فریم‌پیکر اضافه می‌شود.
+  Future<ApiResult<List<Map<String, dynamic>>>> frames() async {
+    try {
+      final r = await _client
+          .get(Uri.parse('$kBaseUrl/api/frames'), headers: _headers)
+          .timeout(const Duration(seconds: 10));
+      _absorb(r);
+      if (r.statusCode == 200 && _isJsonBody(r)) {
+        final v = jsonDecode(utf8.decode(r.bodyBytes));
+        if (v is List) {
+          return ApiResult(ApiStatus.ok,
+              data: v
+                  .whereType<Map>()
+                  .map((e) => Map<String, dynamic>.from(e))
+                  .toList());
+        }
+      }
+      return const ApiResult(ApiStatus.networkError, data: null);
+    } catch (_) {
+      return const ApiResult(ApiStatus.networkError, data: null);
+    }
+  }
 
   Future<ApiResult<bool>> saveProfileTheme(String themeKey) =>
       _postProForm('/save_profile_theme', {'theme': themeKey});
@@ -1677,31 +1839,241 @@ class ApiService {
       return ApiResult(ApiStatus.networkError, message: '$e');
     }
   }
+
+  // ==================== v1.1.1 — pinned messages (Telegram-style) ====================
+  // Room pins are SERVER-SIDE and shared by every member; PV pins are
+  // personal (each side of the chat has its own pin list).
+
+  List<Map<String, dynamic>> _pinsFromJson(String body) {
+    try {
+      final j = jsonDecode(body);
+      if (j is Map && j['pins'] is List) {
+        return (j['pins'] as List)
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+      }
+    } catch (_) {}
+    return const [];
+  }
+
+  Future<ApiResult<List<Map<String, dynamic>>>> roomPins(String roomId) async {
+    try {
+      final r = await _client
+          .get(Uri.parse('$kBaseUrl/api/room/$roomId/pins'), headers: _headers)
+          .timeout(const Duration(seconds: 10));
+      _absorb(r);
+      if (r.statusCode == 200 && _isJsonBody(r)) {
+        return ApiResult(ApiStatus.ok, data: _pinsFromJson(r.body));
+      }
+      return const ApiResult(ApiStatus.error, data: []);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, data: const [], message: '$e');
+    }
+  }
+
+  Future<ApiResult<bool>> pinRoomMessage(String roomId, int messageId) async {
+    try {
+      final r = await _client
+          .post(Uri.parse('$kBaseUrl/room/$roomId/pin'),
+              headers: {..._headers, 'Content-Type': 'application/json'},
+              body: jsonEncode({'message_id': messageId}))
+          .timeout(const Duration(seconds: 10));
+      _absorb(r);
+      return ApiResult(ApiStatus.ok, data: r.statusCode == 200);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, data: false, message: '$e');
+    }
+  }
+
+  Future<ApiResult<bool>> unpinRoomMessage(String roomId, int messageId) async {
+    try {
+      final r = await _client
+          .post(Uri.parse('$kBaseUrl/room/$roomId/unpin'),
+              headers: {..._headers, 'Content-Type': 'application/json'},
+              body: jsonEncode({'message_id': messageId}))
+          .timeout(const Duration(seconds: 10));
+      _absorb(r);
+      return ApiResult(ApiStatus.ok, data: r.statusCode == 200);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, data: false, message: '$e');
+    }
+  }
+
+  Future<ApiResult<List<Map<String, dynamic>>>> pvPins(int chatId) async {
+    try {
+      final r = await _client
+          .get(Uri.parse('$kBaseUrl/api/pv/$chatId/pins'), headers: _headers)
+          .timeout(const Duration(seconds: 10));
+      _absorb(r);
+      if (r.statusCode == 200 && _isJsonBody(r)) {
+        return ApiResult(ApiStatus.ok, data: _pinsFromJson(r.body));
+      }
+      return const ApiResult(ApiStatus.error, data: []);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, data: const [], message: '$e');
+    }
+  }
+
+  Future<ApiResult<bool>> pinPvMessage(int chatId, int messageId) async {
+    try {
+      final r = await _client
+          .post(Uri.parse('$kBaseUrl/api/pv/$chatId/pin'),
+              headers: {..._headers, 'Content-Type': 'application/json'},
+              body: jsonEncode({'message_id': messageId}))
+          .timeout(const Duration(seconds: 10));
+      _absorb(r);
+      return ApiResult(ApiStatus.ok, data: r.statusCode == 200);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, data: false, message: '$e');
+    }
+  }
+
+  Future<ApiResult<bool>> unpinPvMessage(int chatId, int messageId) async {
+    try {
+      final r = await _client
+          .post(Uri.parse('$kBaseUrl/api/pv/$chatId/unpin'),
+              headers: {..._headers, 'Content-Type': 'application/json'},
+              body: jsonEncode({'message_id': messageId}))
+          .timeout(const Duration(seconds: 10));
+      _absorb(r);
+      return ApiResult(ApiStatus.ok, data: r.statusCode == 200);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, data: false, message: '$e');
+    }
+  }
+
+  // ==================== v1.1.1 — group/channel profile editing ====================
+
+  Future<ApiResult<bool>> renameRoom(String roomId, String name) async {
+    try {
+      final r = await _client
+          .post(Uri.parse('$kBaseUrl/room/$roomId/rename'),
+              headers: {..._headers, 'Content-Type': 'application/json'},
+              body: jsonEncode({'name': name}))
+          .timeout(const Duration(seconds: 10));
+      _absorb(r);
+      return ApiResult(ApiStatus.ok, data: r.statusCode == 200);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, data: false, message: '$e');
+    }
+  }
+
+  Future<ApiResult<bool>> setRoomBio(String roomId, String bio) async {
+    try {
+      final r = await _client
+          .post(Uri.parse('$kBaseUrl/room/$roomId/set_bio'),
+              headers: {..._headers, 'Content-Type': 'application/json'},
+              body: jsonEncode({'bio': bio}))
+          .timeout(const Duration(seconds: 10));
+      _absorb(r);
+      return ApiResult(ApiStatus.ok, data: r.statusCode == 200);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, data: false, message: '$e');
+    }
+  }
+
+  /// POST /room/<id>/set_avatar — multipart field `avatar`.
+  Future<ApiResult<bool>> setRoomAvatar(String roomId, String filePath) async {
+    try {
+      final req = http.MultipartRequest('POST', Uri.parse('$kBaseUrl/room/$roomId/set_avatar'))
+        ..files.add(await http.MultipartFile.fromPath('avatar', filePath))
+        ..headers.addAll(_headers);
+      final streamed = await _client.send(req).timeout(const Duration(seconds: 60));
+      final resp = await http.Response.fromStream(streamed);
+      _absorb(resp);
+      return ApiResult(ApiStatus.ok, data: resp.statusCode == 200);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, data: false, message: '$e');
+    }
+  }
+}
+
+
+/// توکن لغو ساده برای آپلود/دانلود (دکمه‌ی ✕ روی حلقه‌ی پیشرفت).
+class TransferCancelToken {
+  bool _cancelled = false;
+  bool get isCancelled => _cancelled;
+  void cancel() => _cancelled = true;
+}
+
+class TransferCancelled implements Exception {
+  const TransferCancelled();
+  @override
+  String toString() => 'cancelled';
 }
 
 /// MultipartRequest that reports upload progress while the body streams out.
 class _ProgressMultipartRequest extends http.MultipartRequest {
   final void Function(int sent, int total)? onProgress;
-  _ProgressMultipartRequest(super.method, super.url, {this.onProgress});
+  final TransferCancelToken? cancel;
+  _ProgressMultipartRequest(super.method, super.url, {this.onProgress, this.cancel});
 
+  /// پیشرفت واقعی: با transform (نه StreamController) تا backpressure حفظ شود؛
+  /// قبلاً کل فایل فوراً بافر می‌شد و نوار پیش از ارسال واقعی ۱۰۰٪ می‌شد.
   @override
   http.ByteStream finalize() {
     final base = super.finalize();
     final total = contentLength;
-    int sent = 0;
-    final controller = StreamController<List<int>>();
-    base.listen(
-      (chunk) {
-        sent += chunk.length;
-        try {
-          onProgress?.call(sent, total);
-        } catch (_) {}
-        controller.add(chunk);
-      },
-      onDone: controller.close,
-      onError: controller.addError,
-      cancelOnError: true,
+    var sent = 0;
+    var aborted = false;
+    return http.ByteStream(base.transform(
+      StreamTransformer<List<int>, List<int>>.fromHandlers(
+        handleData: (chunk, sink) {
+          if (aborted) return;
+          if (cancel?.isCancelled == true) {
+            aborted = true;
+            sink.addError(const TransferCancelled());
+            sink.close();
+            return;
+          }
+          sent += chunk.length;
+          try {
+            onProgress?.call(sent, total);
+          } catch (_) {}
+          sink.add(chunk);
+        },
+      ),
+    ));
+  }
+}
+
+/// v1.1.0 — counts request/response bytes for the Data & Storage panel.
+class _CountingClient extends http.BaseClient {
+  final http.Client inner;
+  _CountingClient(this.inner);
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    try {
+      final body = request is http.Request ? request.bodyBytes.length : 0;
+      final headerEstimate = request.headers.entries
+          .fold(0, (a, e) => a + e.key.length + e.value.length + 8);
+      NetStats.I.addSent(body + headerEstimate + 96);
+    } catch (_) {}
+    final res = await inner.send(request);
+    var n = 0;
+    final counted = res.stream.transform(
+      StreamTransformer<List<int>, List<int>>.fromHandlers(
+        handleData: (chunk, sink) {
+          n += chunk.length;
+          sink.add(chunk);
+        },
+        handleDone: (sink) {
+          NetStats.I.addReceived(n);
+          sink.close();
+        },
+      ),
     );
-    return http.ByteStream(controller.stream);
+    return http.StreamedResponse(
+      counted,
+      res.statusCode,
+      contentLength: res.contentLength,
+      request: res.request,
+      headers: res.headers,
+      isRedirect: res.isRedirect,
+      persistentConnection: res.persistentConnection,
+      reasonPhrase: res.reasonPhrase,
+    );
   }
 }

@@ -1,11 +1,8 @@
 import 'package:flutter/material.dart';
 
-/// Backend server base URL. Set your own endpoint at build time, e.g.:
-///   flutter run --dart-define=RAVI_BASE_URL=http://10.0.2.2:5000
-const String kBaseUrl = String.fromEnvironment(
-  'RAVI_BASE_URL',
-  defaultValue: 'http://localhost:5000',
-);
+/// RAVI ships **not connected** to any backend — point this at your own
+/// RAVI-compatible server (REST + Socket.IO), e.g. 'http://localhost:5000'.
+const String kBaseUrl = '<your-backend-url>';
 
 /// ------------------------------------------------------------------
 /// Runtime accent color (Settings → Accent color).
@@ -61,8 +58,8 @@ class C {
   static const Color bgSoftL = Color(0xFFF4F6F7);
   static const Color bgCardL = Color(0xFFFFFFFF);
   static const Color bgElevL = Color(0xFFFFFFFF);
-  static const Color borderL = Color(0xFFF0F1F2);
-  static const Color borderSoftL = Color(0xFFEDF0F2);
+  static const Color borderL = Color(0xFFECEFF3);
+  static const Color borderSoftL = Color(0xFFE7EBEF);
   static const Color textL = Color(0xFF252B32);
   static const Color text2L = Color(0xFF8C9298);
   static const Color text3L = Color(0xFFA2A8AD);
@@ -71,9 +68,9 @@ class C {
   static const Color navBgL = Color(0xFAFFFFFF); // rgba(255,255,255,.98)
   static const Color overlayL = Color(0x40141C24); // rgba(20,28,36,.25)
 
-  // chat surface (light)
-  static const Color chatFallbackL = Color(0xFFDFE5EA);
-  static const Color chatHeadBgL = Color(0xDBFFFFFF); // rgba(255,255,255,.86)
+  // chat surface (light) — v1.4.0: warm WhatsApp-ish paper for the chat bg
+  static const Color chatFallbackL = Color(0xFFECE3D8);
+  static const Color chatHeadBgL = Color(0xF2FFFFFF); // rgba(255,255,255,.95)
   static const Color chatHeadBorderL = Color(0x12000000); // rgba(0,0,0,.07)
   static const Color chatTextL = Color(0xFF1B2026);
   static const Color chatText2L = Color(0xFF6D7681);

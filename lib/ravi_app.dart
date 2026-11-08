@@ -5,6 +5,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'core/app_state.dart';
 import 'core/constants.dart';
 import 'core/i18n.dart';
+import 'core/media_download_manager.dart';
 import 'ui/auth/auth_screen.dart';
 import 'ui/home/home_shell.dart';
 import 'ui/splash_screen.dart';
@@ -93,6 +94,34 @@ class _RaviAppState extends State<RaviApp> with WidgetsBindingObserver {
               builder: (context, child) {
                 // Global text scale (settings > text size) + font fallbacks.
                 final mq = MediaQuery.of(context);
+                // v1.4.0 — پل toast سراسری برای دانلودهای مدیا (بدون context)
+                ToastBus.attach((msg) {
+                  final overlay = Overlay.of(RaviApp.navKey.currentContext!, rootOverlay: true);
+                  final entry = OverlayEntry(
+                    builder: (_) => Positioned(
+                      bottom: 96,
+                      left: 0,
+                      right: 0,
+                      child: IgnorePointer(
+                        child: Center(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: Colors.black87,
+                              borderRadius: BorderRadius.circular(30),
+                            ),
+                            child: Text(msg,
+                                style: const TextStyle(
+                                    color: Colors.white, fontSize: 13)),
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                  overlay.insert(entry);
+                  Future.delayed(
+                      const Duration(milliseconds: 1800), () => entry.remove());
+                });
                 return ValueListenableBuilder<double>(
                   valueListenable: AppState.I.textScale,
                   builder: (context, scale, _) => MediaQuery(

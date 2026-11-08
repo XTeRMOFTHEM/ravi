@@ -12,5 +12,6 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
-/build/
-.kotlin/
+
+# Flutter build artifacts
+build/

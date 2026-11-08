@@ -41,31 +41,29 @@ class PlayerBar extends StatelessWidget {
             .clamp(0.0, 1.0);
         return Padding(
           padding: const EdgeInsets.fromLTRB(8, 6, 8, 2),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(18),
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-              child: GestureDetector(
-                // v1.0.8 — tap anywhere on the bar → full music panel
-                onTap: () => openMusicPanel(context),
-                behavior: HitTestBehavior.opaque,
-                child: Container(
-                  height: 50,
-                  decoration: BoxDecoration(
-                    color: dark
-                        ? const Color(0xB0101418)
-                        : const Color(0xC8FFFFFF),
-                    borderRadius: BorderRadius.circular(18),
-                    border: Border.all(
-                      color: dark
-                          ? Colors.white.withValues(alpha: .10)
-                          : Colors.white.withValues(alpha: .6),
-                    ),
-                    boxShadow: const [
-                      BoxShadow(color: Color(0x33000000), blurRadius: 16),
-                    ],
-                  ),
-                  child: Stack(children: [
+          child: GestureDetector(
+            // v1.0.8 — tap anywhere on the bar → full music panel
+            onTap: () => openMusicPanel(context),
+            behavior: HitTestBehavior.opaque,
+            child: Container(
+              height: 50,
+              // v1.2.0 PERF — solid translucent bar (the blur re-filtered
+              // every frame while the list scrolled behind it).
+              decoration: BoxDecoration(
+                color: dark
+                    ? const Color(0xF0101418)
+                    : const Color(0xF7FFFFFF),
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: dark
+                      ? Colors.white.withValues(alpha: .10)
+                      : Colors.white.withValues(alpha: .6),
+                ),
+                boxShadow: const [
+                  BoxShadow(color: Color(0x33000000), blurRadius: 16),
+                ],
+              ),
+              child: Stack(children: [
                     // voice → sender avatar as the bar backdrop
                     if (avatarUrl.isNotEmpty)
                       Positioned.fill(
@@ -199,8 +197,6 @@ class PlayerBar extends StatelessWidget {
                       ),
                     ]),
                   ]),
-                ),
-              ),
             ),
           ),
         );

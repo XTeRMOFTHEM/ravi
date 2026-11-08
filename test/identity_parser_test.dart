@@ -2,7 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ravi/core/identity_parser.dart';
 
 void main() {
-  // Exact shape captured live from a logged-in session.
+  // Exact shape captured live from http://195.18.10.82:5000/ (logged in).
   const liveBlock = '''
   <script>
   window.CURRENT_USER = {

@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -8,6 +9,7 @@ import 'package:video_player/video_player.dart';
 
 import '../../core/api_service.dart';
 import '../../core/app_state.dart';
+import '../../core/media_download_manager.dart';
 
 /// Telegram-style full-screen media viewer:
 ///  • images: pinch zoom / pan / double-tap zoom, swipe-down to dismiss
@@ -61,25 +63,78 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
   bool _saving = false;
   Offset _dragOffset = Offset.zero;
 
+  // عکس: اول از دیسکِ ماندگار اپ؛ اگر نبود با پیشرفت دانلود می‌شود
+  final TransformationController _tc = TransformationController();
+  Offset _dtPos = Offset.zero;
+  String? _localPath;
+  bool _imgFailed = false;
+
   String get _url => ApiService.I.absoluteUrl(widget.fileUrl);
+  bool get _zoomed => _tc.value.getMaxScaleOnAxis() > 1.05;
 
   @override
   void initState() {
     super.initState();
     if (widget.isVideo) {
-      _vc = VideoPlayerController.networkUrl(Uri.parse(_url))
-        ..initialize().then((_) {
-          if (mounted) {
-            setState(() {});
-            _vc!.play();
-          }
-        });
+      _prepareVideo();
+    } else {
+      _prepareImage();
+    }
+  }
+
+  Future<void> _prepareImage() async {
+    if (mounted) setState(() => _imgFailed = false);
+    final cached = await MediaDownloadManager.I.cachedPath(widget.fileUrl);
+    if (!mounted) return;
+    if (cached != null) {
+      setState(() => _localPath = cached);
+      return;
+    }
+    final path = await MediaDownloadManager.I.ensureDownloaded(widget.fileUrl);
+    if (!mounted) return;
+    setState(() {
+      if (path != null) {
+        _localPath = path;
+      } else {
+        _imgFailed = true;
+      }
+    });
+  }
+
+  Future<void> _prepareVideo() async {
+    // اگر قبلاً دانلود شده از دیسک پخش می‌شود، وگرنه استریم (با کوکی نشست)
+    final cached = await MediaDownloadManager.I.cachedPath(widget.fileUrl);
+    if (!mounted) return;
+    final vc = cached != null
+        ? VideoPlayerController.file(File(cached))
+        : VideoPlayerController.networkUrl(Uri.parse(_url),
+            httpHeaders: {'Cookie': ApiService.I.cookieHeader});
+    _vc = vc;
+    setState(() {});
+    try {
+      await vc.initialize();
+      if (!mounted) return;
+      setState(() {});
+      vc.play();
+    } catch (_) {
+      if (mounted) setState(() {});
+    }
+  }
+
+  void _toggleZoom() {
+    if (_zoomed) {
+      _tc.value = Matrix4.identity();
+    } else {
+      const sc = 2.5;
+      _tc.value = Matrix4.diagonal3Values(sc, sc, 1)
+        ..setTranslationRaw(-_dtPos.dx * (sc - 1), -_dtPos.dy * (sc - 1), 0);
     }
   }
 
   @override
   void dispose() {
     _vc?.dispose();
+    _tc.dispose();
     super.dispose();
   }
 
@@ -88,7 +143,14 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
     final s = AppState.I.str;
     setState(() => _saving = true);
     try {
-      final dir = await getTemporaryDirectory();
+      // v1.5.0 — دانلود از دیسکِ ماندگار اپ (یک بار برای همیشه) + ذخیره
+      final path = await MediaDownloadManager.I.ensureDownloaded(widget.fileUrl);
+      if (path == null) {
+        if (MediaDownloadManager.I.taskFor(widget.fileUrl)?.state == 'cancelled') {
+          return; // لغو = بی‌صدا
+        }
+        throw 'download';
+      }
       final ext = _url.contains('.mp4')
           ? 'mp4'
           : _url.contains('.webm')
@@ -100,13 +162,10 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
                       : _url.contains('.webp')
                           ? 'webp'
                           : 'jpg';
-      final path =
-          '${dir.path}/ravi_${DateTime.now().millisecondsSinceEpoch}.$ext';
-      final ok = await ApiService.I.downloadToFile(widget.fileUrl, path);
-      if (!ok) throw 'download';
       final res = await SaverGallery.saveFile(
         filePath: path,
         fileName: 'RAVI_${DateTime.now().millisecondsSinceEpoch}.$ext',
+        albumPath: 'RAVI',
         skipIfExists: false,
       );
       if (!mounted) return;
@@ -151,11 +210,13 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
       backgroundColor: Colors.black,
       body: GestureDetector(
         onVerticalDragUpdate: (d) {
+          if (_zoomed) return; // وقتی زوم است کشیدن = جابه‌جایی عکس، نه بستن
           if (d.delta.dy > 0) {
             setState(() => _dragOffset = Offset(0, _dragOffset.dy + d.delta.dy));
           }
         },
         onVerticalDragEnd: (d) {
+          if (_zoomed) return;
           if (_dragOffset.distance > 110) {
             Navigator.of(context).pop();
           } else {
@@ -170,32 +231,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
               offset: _dragOffset,
               child: widget.isVideo
                     ? _videoArea()
-                    : Center(
-                        child: GestureDetector(
-                          onDoubleTap: () {}, // handled by InteractiveViewer
-                          child: InteractiveViewer(
-                            maxScale: 6,
-                            minScale: 0.7,
-                            child: CachedNetworkImage(
-                              imageUrl: _url,
-                              fit: BoxFit.contain,
-                              httpHeaders: {
-                                'Cookie': ApiService.I.cookieHeader,
-                              },
-                              placeholder: (_, __) => const Center(
-                                child: SizedBox(
-                                    width: 34,
-                                    height: 34,
-                                    child: CircularProgressIndicator(
-                                        strokeWidth: 2, color: Colors.white54))),
-                              errorWidget: (_, __, ___) => const Center(
-                                child: Icon(Icons.broken_image_outlined,
-                                    size: 60, color: Colors.white38),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
+                    : _imageArea(),
             ),
 
             // ---- top bar ----
@@ -234,14 +270,37 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
                       ),
                       IconButton(
                         icon: _saving
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2, color: Colors.white))
+                            ? AnimatedBuilder(
+                                animation: MediaDownloadManager.I,
+                                builder: (_, __) {
+                                  final t = MediaDownloadManager.I
+                                      .taskFor(widget.fileUrl);
+                                  final pr = t?.progress ?? 0;
+                                  return SizedBox(
+                                    width: 26,
+                                    height: 26,
+                                    child: Stack(
+                                        alignment: Alignment.center,
+                                        children: [
+                                          CircularProgressIndicator(
+                                            value: pr <= 0
+                                                ? null
+                                                : pr.clamp(0.03, 1.0),
+                                            strokeWidth: 2.2,
+                                            color: Colors.white,
+                                            backgroundColor: Colors.white24,
+                                            strokeCap: StrokeCap.round,
+                                          ),
+                                          const Icon(Icons.close_rounded,
+                                              size: 13, color: Colors.white),
+                                        ]),
+                                  );
+                                })
                             : const Icon(Icons.save_alt_rounded,
                                 color: Colors.white, size: 22),
-                        onPressed: _save,
+                        onPressed: _saving
+                            ? () => MediaDownloadManager.I.cancel(widget.fileUrl)
+                            : _save,
                       ),
                       const SizedBox(width: 6),
                     ],
@@ -255,8 +314,71 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
     );
   }
 
+  Widget _imageArea() {
+    if (_imgFailed) {
+      return Center(
+        child: GestureDetector(
+          onTap: _prepareImage,
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Icon(Icons.broken_image_outlined,
+                size: 60, color: Colors.white38),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+              decoration: BoxDecoration(
+                color: Colors.white12,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.refresh_rounded, size: 16, color: Colors.white),
+                SizedBox(width: 6),
+                Text('Retry',
+                    style: TextStyle(color: Colors.white, fontSize: 12.5)),
+              ]),
+            ),
+          ]),
+        ),
+      );
+    }
+    if (_localPath == null) {
+      return Center(
+        child: _ViewerProgress(
+          fileUrl: widget.fileUrl,
+          onCancel: () {
+            MediaDownloadManager.I.cancel(widget.fileUrl);
+          },
+        ),
+      );
+    }
+    return Center(
+      child: GestureDetector(
+        onDoubleTapDown: (d) => _dtPos = d.localPosition,
+        onDoubleTap: _toggleZoom,
+        child: InteractiveViewer(
+          transformationController: _tc,
+          maxScale: 6,
+          minScale: 1,
+          child: Image.file(
+            File(_localPath!),
+            fit: BoxFit.contain,
+            gaplessPlayback: true,
+            errorBuilder: (_, __, ___) => const Center(
+              child: Icon(Icons.broken_image_outlined,
+                  size: 60, color: Colors.white38),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _videoArea() {
     final vc = _vc;
+    if (vc != null && vc.value.hasError) {
+      return const Center(
+          child: Icon(Icons.error_outline_rounded,
+              size: 56, color: Colors.white38));
+    }
     if (vc == null || !vc.value.isInitialized) {
       // While the player initializes we can't show the first frame yet —
       // keep it dark + spinner (never a jarring empty box).
@@ -365,8 +487,10 @@ class _VideoControls extends StatelessWidget {
                         activeColor: Colors.white,
                         inactiveColor: Colors.white24,
                         value: v.duration.inMilliseconds <= 0
-                            ? 0
-                            : v.position.inMilliseconds / v.duration.inMilliseconds,
+                            ? 0.0
+                            : (v.position.inMilliseconds /
+                                    v.duration.inMilliseconds)
+                                .clamp(0.0, 1.0),
                         onChanged: (t) {
                           vc.seekTo(v.duration * t);
                         },
@@ -401,13 +525,9 @@ class _VideoControls extends StatelessWidget {
                       },
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  IconButton(
-                    icon: const Icon(Icons.fullscreen_rounded, color: Colors.white),
-                    onPressed: () {
-                      v.isPlaying ? vc.pause() : vc.play();
-                    },
-                  ),
+                  // کنار دکمه‌ی صدا برای تقارن (قبلاً دکمه‌ی «تمام‌صفحه» اینجا بود که
+                  // فقط پخش/توقف می‌کرد)
+                  const SizedBox(width: 48),
                 ],
               ),
             ],
@@ -460,4 +580,75 @@ Future<void> openMediaViewer(
     title: title,
     subtitle: subtitle,
   ));
+}
+
+/// حلقه‌ی بزرگ دانلود وسط نمایشگر: ✕ برای لغو + «3.2 / 12.5 MB · 1.1 MB/s».
+class _ViewerProgress extends StatelessWidget {
+  final String fileUrl;
+  final VoidCallback onCancel;
+  const _ViewerProgress({required this.fileUrl, required this.onCancel});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: MediaDownloadManager.I,
+      builder: (_, __) {
+        final t = MediaDownloadManager.I.taskFor(fileUrl);
+        final pr = t?.progress ?? 0;
+        final label = (t != null && t.received > 0)
+            ? [
+                fmtTransfer(t.received, t.total),
+                fmtSpeed(t.speed),
+              ].where((e) => e.isNotEmpty).join(' · ')
+            : '';
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onCancel,
+              child: Container(
+                width: 64,
+                height: 64,
+                decoration: const BoxDecoration(
+                    color: Colors.white12, shape: BoxShape.circle),
+                child: Stack(alignment: Alignment.center, children: [
+                  SizedBox(
+                    width: 58,
+                    height: 58,
+                    child: CircularProgressIndicator(
+                      value: pr <= 0 ? null : pr.clamp(0.03, 1.0),
+                      strokeWidth: 3,
+                      color: Colors.white,
+                      backgroundColor: Colors.white24,
+                      strokeCap: StrokeCap.round,
+                    ),
+                  ),
+                  const Icon(Icons.close_rounded,
+                      size: 26, color: Colors.white),
+                ]),
+              ),
+            ),
+            if (label.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                decoration: BoxDecoration(
+                  color: Colors.white12,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(label,
+                    textDirection: TextDirection.ltr,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600)),
+              ),
+            ],
+          ],
+        );
+      },
+    );
+  }
 }

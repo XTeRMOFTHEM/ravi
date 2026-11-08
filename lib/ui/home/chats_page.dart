@@ -104,9 +104,11 @@ class _ChatsPageState extends State<ChatsPage>
                     child: ListView.builder(
                       controller: _listCtrl,
                       physics: const AlwaysScrollableScrollPhysics(
-                          parent: BouncingScrollPhysics()),
+                          parent: ClampingScrollPhysics()),
                       padding: const EdgeInsets.fromLTRB(12, 0, 12, 96),
-                      scrollCacheExtent: const ScrollCacheExtent.pixels(500),
+                      scrollCacheExtent: const ScrollCacheExtent.pixels(700),
+                      // v1.5.0 — پرفورمانس موبایل ضعیف
+                      addAutomaticKeepAlives: false,
                       itemCount: filtered.length + 2,
                       itemBuilder: (context, i) {
                         if (i == 0) {
@@ -152,10 +154,12 @@ class _ChatsPageState extends State<ChatsPage>
             ),
           ],
         ),
-        // floating + button (new PV / group / channel)
+        // floating + button (new PV / group / channel) — v1.1.1: exactly one
+        // breath above the floating nav capsule on ANY device (the capsule is
+        // 64+10 high with a 6px gap, so 86px clears it everywhere).
         if (!_selecting)
           PositionedDirectional(
-            bottom: 14,
+            bottom: 86,
             end: 16,
             child: _fab(p),
           ),
@@ -270,6 +274,8 @@ class _ChatsPageState extends State<ChatsPage>
       // opening an archived chat unpins it from the archive (Telegram-like)
       await AppState.I.setArchived(c, false);
     }
+    // v1.1.0 — zero the badge NOW and persist it, so it never resurrects
+    AppState.I.zeroUnread(c);
     if (c.kind == ChatKind.general) {
       Navigator.of(context, rootNavigator: true).push(ChatScreen.route(
         kind: ChatKind.general,
@@ -281,10 +287,11 @@ class _ChatsPageState extends State<ChatsPage>
     if (c.kind == ChatKind.pv) {
       Navigator.of(context, rootNavigator: true).push(ChatScreen.route(
         kind: ChatKind.pv,
-        title: c.name,
+        title: c.isSelf ? AppState.I.str.savedMessages : c.name,
         avatarPath: c.avatar,
         chatId: c.id,
         peerUsername: c.peerUsername,
+        isSelfChat: c.isSelf,
       ));
       return;
     }
@@ -431,6 +438,31 @@ class _ChatsPageState extends State<ChatsPage>
                             ? s.archivedToast
                             : s.unarchivedToast,
                         icon: Icons.archive_outlined);
+                  },
+                ),
+                _menuItem(
+                  ctx,
+                  icon: Icons.delete_outline_rounded,
+                  label: s.deleteChat,
+                  color: const Color(0xFFEF4444),
+                  onTap: () async {
+                    Navigator.pop(ctx);
+                    final ok = await showRaviModal(
+                      context,
+                      icon: Icons.delete_outline_rounded,
+                      iconColor: const Color(0xFFEF4444),
+                      title: s.deleteChat,
+                      body: s.deleteChatConfirm,
+                      okText: s.delete,
+                      cancelText: s.cancel,
+                      danger: true,
+                    );
+                    if (!ok) return;
+                    await AppState.I.deleteChatLocally(chat);
+                    if (!mounted) return;
+                    showGlassToast(context, s.chatDeletedToast,
+                        icon: Icons.delete_outline_rounded,
+                        color: const Color(0xFFEF4444));
                   },
                 ),
                 const SizedBox(height: 10),
@@ -713,18 +745,50 @@ class _ChatRowState extends State<_ChatRow>
   }
 
   String _previewText(bool isFa) {
-    switch (widget.chat.lastFileType) {
+    final chat = widget.chat;
+    final me = AppState.I.me.value.username;
+    // v1.1.0 — "You: " prefix when the last message is ours (Telegram)
+    final mine = chat.lastUser.isNotEmpty && chat.lastUser == me;
+    String body;
+    switch (chat.lastFileType) {
       case 'image':
-        return isFa ? '📷 عکس' : '📷 Photo';
+        body = isFa ? '📷 عکس' : '📷 Photo';
+        break;
       case 'video':
-        return isFa ? '🎥 ویدیو' : '🎥 Video';
+        // v1.3.2 — the user-facing spelling, WhatsApp-clean
+        body = isFa ? '🎥 ویدئو' : '🎥 Video';
+        break;
+      case 'music':
+        // v1.3.2 — a SONG shows its clean name (server stores the title in
+        // last_message), never a generic "voice message" label.
+        final t = chat.lastMessage.trim();
+        body = t.isEmpty
+            ? (isFa ? '🎵 موزیک' : '🎵 Music')
+            : '🎵 $t';
+        break;
+      case 'voice':
       case 'audio':
-        return isFa ? '🎤 پیام صوتی' : '🎤 Voice message';
+        body = isFa ? '🎤 پیام صوتی' : '🎤 Voice message';
+        break;
       case 'gif':
-        return 'GIF';
+        body = 'GIF';
+        break;
+      case 'file':
+        body = isFa ? '📄 فایل' : '📄 File';
+        break;
       default:
-        return widget.chat.lastMessage;
+        body = chat.lastMessage;
     }
+    // v1.3.1 — the preview NEVER renders as an empty line: old rows (before
+    // last_file_type existed) or unusual kinds fall back to a neutral label
+    // instead of a blank "…" strip.
+    if (body.trim().isEmpty) {
+      body = isFa ? '💬 پیام' : '💬 Message';
+    }
+    if (mine && body.isNotEmpty) {
+      return AppState.I.str.youPrefix(body);
+    }
+    return body;
   }
 
   @override
@@ -792,6 +856,8 @@ class _ChatRowState extends State<_ChatRow>
                   avatarPath: chat.avatar,
                   size: 57,
                   globe: chat.kind == ChatKind.general,
+                  // v1.4.0 — سیو مسیج: آواتار بوکمارک طلایی مثل تلگرام
+                  bookmark: chat.isSelf,
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -808,18 +874,39 @@ class _ChatRowState extends State<_ChatRow>
                             const SizedBox(width: 4),
                           ],
                           Expanded(
-                            child: Text(
-                              // v1.0.9 — PV rows show the DISPLAY NAME, and
-                              // rooms never fall back to a raw empty string.
-                              chat.name.trim().isNotEmpty
-                                  ? chat.name
-                                  : (chat.peerUsername.isNotEmpty
-                                      ? chat.peerUsername
-                                      : '…'),
-                              maxLines: 1, overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                  fontSize: 15.5, fontWeight: FontWeight.w700,
-                                  color: p.text, height: 1.2),
+                            child: Row(
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    // v1.0.9 — PV rows show the DISPLAY NAME, and
+                                    // rooms never fall back to a raw empty string.
+                                    // v1.4.0 — سیو مسیج عنوان ثابت خودش را دارد
+                                    chat.isSelf
+                                        ? AppState.I.str.savedMessages
+                                        : (chat.name.trim().isNotEmpty
+                                            ? chat.name
+                                            : (chat.peerUsername.isNotEmpty
+                                                ? chat.peerUsername
+                                                : '…')),
+                                    maxLines: 1, overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                        fontSize: 15.5, fontWeight: FontWeight.w700,
+                                        color: p.text, height: 1.2),
+                                  ),
+                                ),
+                                // v1.3.2 — PRO star (blue tick) of the peer, like
+                                // WhatsApp's business/verified badge in the list.
+                                // Static mini star in rows (Telegram does the same;
+                                // no 50 concurrent animations in a scrolling list).
+                                if (chat.kind == ChatKind.pv && chat.isPro) ...[
+                                  const SizedBox(width: 4),
+                                  const ProStarBadge(size: 14, animate: false),
+                                ],
+                                if (chat.kind == ChatKind.pv && chat.isOfficial && !chat.isPro) ...[
+                                  const SizedBox(width: 4),
+                                  const VerifiedBadge(size: 13),
+                                ],
+                              ],
                             ),
                           ),
                           if (chat.lastTime.isNotEmpty)
@@ -878,10 +965,12 @@ class _ChatRowState extends State<_ChatRow>
     if (chat.kind == ChatKind.pv) {
       Navigator.of(context, rootNavigator: true).push(ChatScreen.route(
         kind: ChatKind.pv,
-        title: chat.name,
+        // v1.5.0 — سیو مسیج: عنوان و ایکون بوکمارک درست منتقل می‌شود
+        title: chat.isSelf ? AppState.I.str.savedMessages : chat.name,
         avatarPath: chat.avatar,
         chatId: chat.id,
         peerUsername: chat.peerUsername,
+        isSelfChat: chat.isSelf,
       ));
       return;
     }

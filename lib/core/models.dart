@@ -1,4 +1,10 @@
 /// Data models mirroring the RAVI backend JSON.
+import 'dart:convert';
+
+/// v1.3.2 — Persian labels for media snippets (reply previews / forwards).
+/// models.dart cannot import AppState (import cycle), so the UI layer pushes
+/// the language flag here once at startup.
+bool kSnippetFa = true;
 
 class RaviUser {
   final int id;
@@ -60,6 +66,11 @@ class ChatPreview {
   final int unread;
   final bool canPost;
   final bool pinned;
+  // v1.3.2 — PV peer badges (pro star / verified) shown in the chats list.
+  final bool isPro;
+  final bool isOfficial;
+  // v1.4.0 — سیو مسیج: چت با خودمان (sender == receiver)
+  final bool isSelf;
 
   const ChatPreview({
     required this.id,
@@ -76,6 +87,9 @@ class ChatPreview {
     this.unread = 0,
     this.canPost = true,
     this.pinned = false,
+    this.isPro = false,
+    this.isOfficial = false,
+    this.isSelf = false,
   });
 
   /// Stable identity for lists / sockets / pinning.
@@ -127,9 +141,18 @@ class ChatPreview {
         lastMessage: '${j['last_message'] ?? ''}',
         lastTime: _fmtTime(j['last_time']),
         lastTs: '${j['last_time'] ?? ''}',
+        // v1.3.2 — the file type of the LAST message (was dropped here, so
+        // PV previews always showed raw text and never GIF/music/video labels)
+        lastFileType: '${j['last_file_type'] ?? 'text'}',
+        lastUser: '${j['last_user'] ?? ''}',
         unread: (j['unread_count'] ?? 0) is int
             ? j['unread_count'] as int
             : int.tryParse('${j['unread_count']}') ?? 0,
+        // v1.3.2 — pro star / blue tick of the peer
+        isPro: j['other_pro'] == true,
+        isOfficial: j['other_official'] == true,
+        // v1.4.0 — چت سیو مسیج (با خودمان)
+        isSelf: j['is_self'] == true,
       );
 
   ChatPreview copyWith({
@@ -140,6 +163,9 @@ class ChatPreview {
     String? lastFileType,
     String? lastUser,
     bool? pinned,
+    bool? isPro,
+    bool? isOfficial,
+    bool? isSelf,
   }) =>
       ChatPreview(
         id: id,
@@ -156,13 +182,24 @@ class ChatPreview {
         unread: unread ?? this.unread,
         canPost: canPost,
         pinned: pinned ?? this.pinned,
+        isPro: isPro ?? this.isPro,
+        isOfficial: isOfficial ?? this.isOfficial,
+        isSelf: isSelf ?? this.isSelf,
       );
 
   static String _fmtTime(dynamic t) {
     final s = '$t';
     if (s.isEmpty || s == 'None' || s == 'null') return '';
     final p = s.split(' ');
-    return (p.length > 1 ? p[1] : p[0]);
+    var clock = (p.length > 1 ? p[1] : p[0]);
+    // v1.5.0 — همیشه «HH:MM» خالص: ثانیه/میلی‌ثانیه و بقایای datetime قدیمی
+    // («09:23:45.123456») هرگز در سطر لیست چت‌ها دیده نمی‌شوند.
+    final m = RegExp(r'^(\d{1,2}:\d{2})').firstMatch(clock);
+    if (m != null) {
+      final parts = m.group(1)!.split(':');
+      return '${parts[0].padLeft(2, '0')}:${parts[1]}';
+    }
+    return clock;
   }
 }
 
@@ -458,13 +495,37 @@ class Message {
   final bool isPro;
   final bool isOfficial;
   final String adminTitle;
+  // v1.1.1 — true when the author IS the group/channel owner (gold tag)
+  final bool isOwner;
   // ---- v1.0.6: optimistic local media + upload progress (Telegram-style) ----
   final String localPath; // local file while uploading (image preview)
   final double uploadPct; // 0..1 (only while pending + localPath set)
+  final int uploadSent; // bytes already sent (for «3.2 / 12.5 MB»)
   final int fileSize; // bytes (0 = unknown)
   final bool removing; // true during the delete animation
   final bool isEdited; // v1.0.7: message was edited ("edited" tag)
   final List<ReactionUser> reactors; // v1.0.7: avatar list for reaction chips
+  // v1.1.0 — client-side album grouping: several photos sent together share
+  // one albumId and render inside a single Telegram-style grouped bubble.
+  final String albumId;
+  // ---- v1.2.1 — Telegram-style media metadata ----
+  //  • mediaW/mediaH : pixel dims of a photo/album item — the bubble reserves
+  //    the exact aspect from frame ONE (no more layout shift when the image
+  //    finishes decoding = the "small jump" on send)
+  //  • music metadata: title / artist / cover / duration parsed from ID3 tags
+  //  • isVoiceNote   : true for recorded voice notes, false for music files
+  final int mediaW;
+  final int mediaH;
+  final String mediaTitle;
+  final String mediaArtist;
+  final String mediaCover;
+  final int mediaDurMs;
+  final bool isVoiceNote;
+  // v1.3.1 — backend `media_meta.kind` ('voice'|'music'). When the server
+  // explicitly says MUSIC (it also infers it from the file extension for old
+  // rows), the bubble STAYS a music player after re-entering the chat — the
+  // old "song turns into a voice note" bug.
+  final bool isMusicKind;
 
   const Message({
     required this.id,
@@ -491,12 +552,23 @@ class Message {
     this.isPro = false,
     this.isOfficial = false,
     this.adminTitle = '',
+    this.isOwner = false,
     this.localPath = '',
     this.uploadPct = 0,
+    this.uploadSent = 0,
     this.fileSize = 0,
     this.removing = false,
     this.isEdited = false,
     this.reactors = const [],
+    this.albumId = '',
+    this.mediaW = 0,
+    this.mediaH = 0,
+    this.mediaTitle = '',
+    this.mediaArtist = '',
+    this.mediaCover = '',
+    this.mediaDurMs = 0,
+    this.isVoiceNote = false,
+    this.isMusicKind = false,
   });
 
   Message copyWith({
@@ -511,9 +583,19 @@ class Message {
     String? fileUrl,
     String? localPath,
     double? uploadPct,
+    int? uploadSent,
     int? fileSize,
     bool? removing,
     bool? isEdited,
+    String? albumId,
+    int? mediaW,
+    int? mediaH,
+    String? mediaTitle,
+    String? mediaArtist,
+    String? mediaCover,
+    int? mediaDurMs,
+    bool? isVoiceNote,
+    bool? isMusicKind,
   }) =>
       Message(
         id: id ?? this.id,
@@ -541,18 +623,82 @@ class Message {
         isPro: isPro,
         isOfficial: isOfficial,
         adminTitle: adminTitle,
+        isOwner: isOwner,
         localPath: localPath ?? this.localPath,
         uploadPct: uploadPct ?? this.uploadPct,
+        uploadSent: uploadSent ?? this.uploadSent,
         fileSize: fileSize ?? this.fileSize,
         removing: removing ?? this.removing,
         isEdited: isEdited ?? this.isEdited,
+        albumId: albumId ?? this.albumId,
+        mediaW: mediaW ?? this.mediaW,
+        mediaH: mediaH ?? this.mediaH,
+        mediaTitle: mediaTitle ?? this.mediaTitle,
+        mediaArtist: mediaArtist ?? this.mediaArtist,
+        mediaCover: mediaCover ?? this.mediaCover,
+        mediaDurMs: mediaDurMs ?? this.mediaDurMs,
+        isVoiceNote: isVoiceNote ?? this.isVoiceNote,
+        isMusicKind: isMusicKind ?? this.isMusicKind,
       );
 
   bool get isImage => fileType == 'image' || fileType == 'gif';
   bool get isVideo => fileType == 'video';
   bool get isAudio => fileType == 'audio';
+  bool get isFile =>
+      fileType != 'text' && !isImage && !isVideo && !isAudio;
   bool get isMedia => isImage || isVideo || isAudio;
   bool get mine => isMe;
+
+  /// v1.2.1 — Telegram-style SERVICE messages (glass capsule, no bubble):
+  /// backend tags them with a `sys_*` file_type (join / leave / ban …).
+  bool get isService => fileType.startsWith('sys_');
+  bool get isServiceJoin =>
+      fileType == 'sys_join_link' || fileType == 'sys_join_username';
+  bool get isServiceLeave => fileType == 'sys_leave';
+
+  /// v1.2.1 — a true MUSIC file (not a recorded voice note): decided by the
+  /// parsed metadata; v1.3.1 — the backend `kind:'music'` flag (inferred from
+  /// the file extension for old rows) also counts, with or without a title.
+  bool get isMusic =>
+      isAudio && !isVoiceNote && (mediaTitle.isNotEmpty || isMusicKind);
+
+  /// v1.3.1 — "Song 01" from "/static/uploads/12_..._ab/Song 01.mp3".
+  String get musicTitleFallback {
+    if (mediaTitle.isNotEmpty) return mediaTitle;
+    if (fileUrl.isEmpty) return 'Music';
+    var base = fileUrl.split('/').last;
+    final dot = base.lastIndexOf('.');
+    if (dot > 0) base = base.substring(0, dot);
+    // server-generated names ("3_20261030194012_ab12cd") are noise for a
+    // human — show a clean generic label instead of garbage digits.
+    if (RegExp(r'^\d{1,6}_\d{10,}_[0-9a-f]{4,}$').hasMatch(base)) return 'Music';
+    return base.isEmpty ? 'Music' : base;
+  }
+
+  /// Aspect ratio for photo/video envelopes (0 = unknown).
+  double get mediaAspect =>
+      (mediaW > 0 && mediaH > 0) ? mediaW / mediaH : 0;
+
+  /// v1.1.0 — number of real emoji glyphs in an emoji-only message
+  /// (variation selectors / ZWJ / spaces are not counted).
+  int get emojiCount {
+    if (!isEmojiOnly) return 1;
+    var n = 0;
+    for (final r in text.runes) {
+      if (r == 0xFE0F || r == 0x200D || r == 0x200B || r == 0x20) continue;
+      n++;
+    }
+    return n < 1 ? 1 : n;
+  }
+
+  /// Telegram emoji-only font size: one emoji big, multiples smaller.
+  double get emojiFontSize {
+    final c = emojiCount;
+    if (c == 1) return 40;
+    if (c == 2) return 32;
+    if (c <= 4) return 26;
+    return 21;
+  }
 
   /// Telegram-style: a message that is ONLY emoji (no text) floats without a
   /// bubble. Allows up to 8 emoji with optional spaces/variation selectors.
@@ -579,12 +725,36 @@ class Message {
   }
 
   /// Snippet used by reply quotes / forward previews.
+  /// v1.3.2 — clean WhatsApp-style labels, Persian-first like the app:
+  /// GIF → "GIF", music → its clean song name, video → "ویدئو".
   String get previewSnippet {
+    final fa = kSnippetFa;
     if (isEmojiOnly) return text;
+    if (isServiceJoin) return '👥';
+    if (isServiceLeave) return '👋';
     if (fileType == 'gif') return 'GIF';
-    if (isImage) return '📷 Photo';
-    if (isVideo) return '🎥 Video';
-    if (isAudio) return '🎤 Voice message';
+    if (isMusic) {
+      final t = musicTitleFallback;
+      return t.isEmpty ? (fa ? '🎵 موزیک' : '🎵 Music') : '🎵 $t';
+    }
+    if (isImage) return fa ? '📷 عکس' : '📷 Photo';
+    if (isVideo) return fa ? '🎥 ویدئو' : '🎥 Video';
+    if (isAudio) return fa ? '🎤 پیام صوتی' : '🎤 Voice message';
+    // v1.5.0 — پیش‌نمایش فایل: 📄 + اسم واقعی فایل (یا «فایل»)
+    if (isFile) {
+      final t = mediaTitle.trim();
+      if (t.isNotEmpty) return '📄 $t';
+      if (fileUrl.isNotEmpty) {
+        var base = fileUrl.split('/').last;
+        final dot = base.lastIndexOf('.');
+        if (dot > 0) base = base.substring(0, dot);
+        if (RegExp(r'^\d{1,6}_\d{10,}_[0-9a-f]{4,}$').hasMatch(base)) {
+          return fa ? '📄 فایل' : '📄 File';
+        }
+        if (base.isNotEmpty) return '📄 $base';
+      }
+      return fa ? '📄 فایل' : '📄 File';
+    }
     return text;
   }
 
@@ -608,15 +778,28 @@ class Message {
     return const [];
   }
 
+  /// v1.1.0 — normalize any server timestamp to a clean "HH:MM".
+  static String _normTime(String raw) {
+    final s = raw.trim();
+    if (s.isEmpty || s == 'None' || s == 'null') return '';
+    // full datetime → take the clock part
+    final space = s.indexOf(' ');
+    final clock = space > 0 ? s.substring(space + 1) : s;
+    final m = RegExp(r'^(\d{1,2}):(\d{2})').firstMatch(clock);
+    if (m == null) return clock;
+    return '${m.group(1)!.padLeft(2, '0')}:${m.group(2)}';
+  }
+
   /// Build from /api/general_messages JSON row (also room messages).
   factory Message.fromGeneral(Map<String, dynamic> j, String myUsername) {
     final ts = '${j['timestamp'] ?? ''}';
+    final mm = _parseMediaMeta(j['media_meta']);
     return Message(
       id: _i(j['message_id']),
       username: '${j['username'] ?? ''}',
       displayName: '${j['display_name'] ?? ''}',
       text: '${j['message'] ?? ''}',
-      time: ts.split(' ').last,
+      time: _normTime(ts),
       dateKey: '${j['date_key'] ?? ''}',
       avatar: '${j['avatar'] ?? ''}',
       fileUrl: '${j['file_url'] ?? ''}',
@@ -632,19 +815,30 @@ class Message {
       isPro: j['is_pro'] == true,
       isOfficial: j['is_official'] == true,
       adminTitle: '${j['admin_title'] ?? ''}',
+      isOwner: j['author_is_owner'] == true ||
+          '${j['admin_title'] ?? ''}'.toLowerCase() == 'owner',
       isEdited: j['is_edited'] == true,
+      mediaW: mm.w,
+      mediaH: mm.h,
+      mediaTitle: mm.title,
+      mediaArtist: mm.artist,
+      mediaCover: mm.cover,
+      mediaDurMs: mm.durMs,
+      isVoiceNote: mm.voice,
+      isMusicKind: mm.music,
     );
   }
 
   /// Build from socket `new_message` payload.
   factory Message.fromSocket(Map<String, dynamic> j, String myUsername) {
+    final mm = _parseMediaMeta(j['media_meta']);
     return Message(
       id: _i(j['message_id']),
       clientMsgId: '${j['client_msg_id'] ?? ''}',
       username: '${j['username'] ?? ''}',
       displayName: '${j['display_name'] ?? ''}',
       text: '${j['message'] ?? ''}',
-      time: '${j['timestamp'] ?? ''}',
+      time: _normTime('${j['timestamp'] ?? ''}'),
       dateKey: _todayKey(),
       avatar: '${j['avatar'] ?? ''}',
       fileUrl: '${j['file_url'] ?? ''}',
@@ -659,7 +853,50 @@ class Message {
       isPro: j['is_pro'] == true,
       isOfficial: j['is_official'] == true,
       adminTitle: '${j['admin_title'] ?? ''}',
+      isOwner: j['sender_is_owner'] == true,
       isEdited: j['is_edited'] == true,
+      mediaW: mm.w,
+      mediaH: mm.h,
+      mediaTitle: mm.title,
+      mediaArtist: mm.artist,
+      mediaCover: mm.cover,
+      mediaDurMs: mm.durMs,
+      isVoiceNote: mm.voice,
+      isMusicKind: mm.music,
+    );
+  }
+
+  /// v1.3.2 — public wrapper so controllers (confirmSent) can merge the
+  /// send-echo's media_meta into the optimistic message the same way
+  /// Message.fromSocket does.
+  static ({int w, int h, String title, String artist, String cover, int durMs, bool voice, bool music})
+      parseMediaMeta(dynamic v) => _parseMediaMeta(v);
+
+  /// v1.2.1 — parse the backend `media_meta` payload (JSON string or map):
+  /// {kind:'voice'|'music', title, artist, cover, dur(ms), w, h}
+  static ({int w, int h, String title, String artist, String cover, int durMs, bool voice, bool music})
+      _parseMediaMeta(dynamic v) {
+    var m = v;
+    if (m is String) {
+      try {
+        m = jsonDecode(m);
+      } catch (_) {
+        m = null;
+      }
+    }
+    if (m is! Map) {
+      return (w: 0, h: 0, title: '', artist: '', cover: '', durMs: 0, voice: false, music: false);
+    }
+    int ii(dynamic x) => x is int ? x : int.tryParse('$x') ?? 0;
+    return (
+      w: ii(m['w'] ?? m['width'] ?? 0),
+      h: ii(m['h'] ?? m['height'] ?? 0),
+      title: '${m['title'] ?? ''}',
+      artist: '${m['artist'] ?? ''}',
+      cover: '${m['cover'] ?? ''}',
+      durMs: ii(m['dur'] ?? m['dur_ms'] ?? m['duration'] ?? 0),
+      voice: '${m['kind'] ?? ''}' == 'voice' || m['voice'] == true,
+      music: '${m['kind'] ?? ''}' == 'music',
     );
   }
 
@@ -667,13 +904,24 @@ class Message {
   factory Message.fromPv(Map<String, dynamic> j, String myUsername) {
     final ts = '${j['timestamp'] ?? ''}';
     final parts = ts.split(' ');
+    // v1.1.1 CRITICAL date-pill fix: the PV payload's `timestamp` is only
+    // "HH:MM" — the REAL day separator must come from `date_key`.
+    // Falling back to the clock part made dateKey differ on EVERY message,
+    // which rendered a "Today" pill after every single bubble.
+    final dkRaw = '${j['date_key'] ?? ''}'.trim();
+    final dk = RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(dkRaw)
+        ? dkRaw
+        : (RegExp(r'^\d{4}-\d{2}-\d{2}').hasMatch(parts[0])
+            ? parts[0].substring(0, 10)
+            : '');
+    final mm = _parseMediaMeta(j['media_meta']);
     return Message(
       id: _i(j['id']),
       username: '${j['username'] ?? ''}',
       displayName: '${j['display_name'] ?? ''}',
       text: '${j['message'] ?? ''}',
-      time: parts.length > 1 ? parts[1] : ts,
-      dateKey: parts[0],
+      time: _normTime(ts),
+      dateKey: dk,
       avatar: '${j['avatar'] ?? ''}',
       fileUrl: '${j['file_url'] ?? ''}',
       fileType: '${j['file_type'] ?? 'text'}',
@@ -685,6 +933,14 @@ class Message {
       forwardFrom: '${j['forward_from'] ?? ''}',
       forwardFromUsername: '${j['forward_from_username'] ?? ''}',
       isRead: j['is_read'] == true,
+      mediaW: mm.w,
+      mediaH: mm.h,
+      mediaTitle: mm.title,
+      mediaArtist: mm.artist,
+      mediaCover: mm.cover,
+      mediaDurMs: mm.durMs,
+      isVoiceNote: mm.voice,
+      isMusicKind: mm.music,
     );
   }
 
@@ -703,7 +959,10 @@ class Message {
         'pg': pending, 'fl': failed,
         'rc': _reactionsToCache(), 'ir': isRead,
         'ff': forwardFrom, 'ffu': forwardFromUsername,
-        'ie': isEdited,
+        'ie': isEdited, 'al': albumId,
+        'mw': mediaW, 'mh': mediaH, 'mt': mediaTitle, 'ma': mediaArtist,
+        'mc': mediaCover, 'md': mediaDurMs, 'iv': isVoiceNote,
+        'im': isMusicKind,
       };
 
   factory Message.fromCache(Map<dynamic, dynamic> j) => Message(
@@ -728,6 +987,15 @@ class Message {
         forwardFrom: '${j['ff'] ?? ''}',
         forwardFromUsername: '${j['ffu'] ?? ''}',
         isEdited: j['ie'] == true,
+        albumId: '${j['al'] ?? ''}',
+        mediaW: j['mw'] is int ? j['mw'] as int : int.tryParse('${j['mw']}') ?? 0,
+        mediaH: j['mh'] is int ? j['mh'] as int : int.tryParse('${j['mh']}') ?? 0,
+        mediaTitle: '${j['mt'] ?? ''}',
+        mediaArtist: '${j['ma'] ?? ''}',
+        mediaCover: '${j['mc'] ?? ''}',
+        mediaDurMs: j['md'] is int ? j['md'] as int : int.tryParse('${j['md']}') ?? 0,
+        isVoiceNote: j['iv'] == true,
+        isMusicKind: j['im'] == true,
       );
 }
 

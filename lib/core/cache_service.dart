@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
 
+import 'api_service.dart';
+
 /// Lightweight append/replace JSON-file cache — the "Telegram-like" instant
 /// open layer. Chats list and last N messages of each conversation are stored
 /// on disk, so the app always paints real content immediately, then refreshes
@@ -21,13 +23,34 @@ class CacheService {
       _dir = Directory('${base.path}/ravi_cache');
       if (!await _dir.exists()) await _dir.create(recursive: true);
       _ready = true;
+      _purgeLegacy();
     } catch (_) {
       _dir = Directory.systemTemp.createTempSync('ravi_cache');
       _ready = true;
     }
   }
 
-  File _file(String key) => File('${_dir.path}/$key.json');
+  /// کش هر حساب جداست (قبلاً همه‌ی حساب‌ها یک فایل مشترک داشتند و پیام‌ها و
+  /// چت‌های یک حساب داخل حساب دیگر — از جمله «پیام‌های ذخیره‌شده» — دیده می‌شد).
+  String _scope() {
+    final u = ApiService.I.cachedUsername.toLowerCase();
+    final safe = u.replaceAll(RegExp(r'[^a-z0-9_-]'), '_');
+    return safe.isEmpty ? 'anon' : safe;
+  }
+
+  File _file(String key) => File('${_dir.path}/${_scope()}__$key.json');
+
+  /// فایل‌های قدیمیِ بدون اسکوپ (مشترک بین حساب‌ها) پاک می‌شوند.
+  void _purgeLegacy() {
+    try {
+      for (final e in _dir.listSync()) {
+        if (e is File) {
+          final name = e.uri.pathSegments.last;
+          if (!name.contains('__')) e.deleteSync();
+        }
+      }
+    } catch (_) {}
+  }
 
   /// Writes are atomic (tmp file + rename) so a kill mid-write never corrupts.
   Future<void> put(String key, List<Map<String, dynamic>> data) async {

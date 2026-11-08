@@ -42,6 +42,13 @@ class SocketService {
   final _userBlocked = StreamController<Map<String, dynamic>>.broadcast();
   final _userUnblocked = StreamController<Map<String, dynamic>>.broadcast();
   final _roomSettings = StreamController<Map<String, dynamic>>.broadcast();
+  // v1.1.0 — membership events (join / leave / kick / ban) for the thin
+  // glass center toasts, exactly like Telegram's service messages.
+  final _memberEvent = StreamController<Map<String, dynamic>>.broadcast();
+  // v1.1.1 — pinned-message updates (room + pv)
+  final _pinsUpdate = StreamController<Map<String, dynamic>>.broadcast();
+  // v1.5.0 — پیش‌نمایش زنده‌ی ردیف گروه/کانال در لیست چت‌ها (بدون رفرش)
+  final _roomChatsUpdated = StreamController<Map<String, dynamic>>.broadcast();
 
   Stream<Map<String, dynamic>> get onNewMessage => _newMessage.stream;
   Stream<Map<String, dynamic>> get onNewPvMessage => _newPvMessage.stream;
@@ -59,6 +66,10 @@ class SocketService {
   Stream<Map<String, dynamic>> get onUserBlocked => _userBlocked.stream;
   Stream<Map<String, dynamic>> get onUserUnblocked => _userUnblocked.stream;
   Stream<Map<String, dynamic>> get onRoomSettings => _roomSettings.stream;
+  Stream<Map<String, dynamic>> get onMemberEvent => _memberEvent.stream;
+  Stream<Map<String, dynamic>> get onPinsUpdate => _pinsUpdate.stream;
+  // v1.5.0 — پیش‌نمایش گروه/کانال (اسم/ساعت/متن آخرین پیام) بدون رفرش
+  Stream<Map<String, dynamic>> get onRoomChatsUpdated => _roomChatsUpdated.stream;
 
   bool get connected => _socket?.connected ?? false;
 
@@ -137,11 +148,37 @@ class SocketService {
       ..on('user_blocked', (d) => _safeAdd(_userBlocked, d))
       ..on('user_unblocked', (d) => _safeAdd(_userUnblocked, d))
       ..on('room_settings_updated', (d) => _safeAdd(_roomSettings, d))
-      ..on('error', (d) => _safeAdd(_serverError, d));
+      ..on('error', (d) => _safeAdd(_serverError, d))
+      // v1.1.0 — every plausible membership event name the backend may emit;
+      // unknown ones simply never fire (zero cost).
+      ..on('room_member_joined', (d) => _member(d, 'join'))
+      ..on('member_joined', (d) => _member(d, 'join'))
+      ..on('user_joined', (d) => _member(d, 'join'))
+      ..on('member_added', (d) => _member(d, 'join'))
+      ..on('room_member_left', (d) => _member(d, 'leave'))
+      ..on('member_left', (d) => _member(d, 'leave'))
+      ..on('user_left', (d) => _member(d, 'leave'))
+      ..on('member_kicked', (d) => _member(d, 'kick'))
+      ..on('user_kicked', (d) => _member(d, 'kick'))
+      ..on('member_removed', (d) => _member(d, 'kick'))
+      ..on('member_banned', (d) => _member(d, 'ban'))
+      ..on('user_banned', (d) => _member(d, 'ban'))
+      // v1.1.1 — pins: room + pv share one stream (payload carries the id)
+      ..on('room_pins_update', (d) => _safeAdd(_pinsUpdate, d))
+      ..on('pv_pins_update', (d) => _safeAdd(_pinsUpdate, d))
+      // v1.5.0 — پیش‌نمایش زنده‌ی گروه/کانال در لیست چت‌ها
+      ..on('room_chats_updated', (d) => _safeAdd(_roomChatsUpdated, d));
   }
 
   void _safeAdd(StreamController<Map<String, dynamic>> c, dynamic d) {
     if (d is Map) c.add(Map<String, dynamic>.from(d));
+  }
+
+  void _member(dynamic d, String kind) {
+    if (d is! Map) return;
+    final m = Map<String, dynamic>.from(d);
+    m['event_kind'] = kind;
+    _memberEvent.add(m);
   }
 
   // ---- room bookkeeping (re-joined automatically on reconnect) ----

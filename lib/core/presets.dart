@@ -51,6 +51,14 @@ class ProPresets {
     ('bushido', 'Bushido'),
     ('celestial', 'Celestial'),
     ('crimson', 'Crimson'),
+    // v1.5.0 — ۷ قاب جدید (از بانک قاب سرور: /static/frames/)
+    ('baroque', 'Baroque'),
+    ('butterfly', 'Butterfly'),
+    ('gothic', 'Gothic'),
+    ('silverstars', 'Silver Stars'),
+    ('starsoutline', 'Stars Outline'),
+    ('thorns', 'Thorns'),
+    ('wings', 'Wings'),
   ];
 
   static const Map<String, Color> cardBgThemes = {

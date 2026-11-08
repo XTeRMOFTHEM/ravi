@@ -4,12 +4,15 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'account_manager.dart';
 import 'api_service.dart';
 import 'cache_service.dart';
 import 'constants.dart';
 import 'i18n.dart';
 import 'models.dart';
 import 'socket_service.dart';
+
+export 'models.dart' show kSnippetFa;
 
 /// Theme preference: light / dark / system (same choices as the web app).
 enum ThemeModePref { light, dark, system }
@@ -56,6 +59,8 @@ class AppState {
     final ti = prefs.getInt('pref.theme') ?? 0;
     themePref.value = ThemeModePref.values[(ti < 0 ? 0 : (ti >= ThemeModePref.values.length ? ThemeModePref.values.length - 1 : ti))];
     lang.value = Lang(prefs.getString('pref.lang') ?? 'fa');
+    // v1.3.2 — Persian-first media snippet labels (reply previews)
+    kSnippetFa = (prefs.getString('pref.lang') ?? 'fa') != 'en';
     textScale.value = prefs.getDouble('pref.textScale') ?? 1.0;
     notificationsOn.value = prefs.getBool('pref.notify') ?? true;
     soundsOn.value = prefs.getBool('pref.sounds') ?? true;
@@ -83,6 +88,7 @@ class AppState {
 
   Future<void> setLang(Lang l) async {
     lang.value = l;
+    kSnippetFa = l.code != 'en';
     await prefs.setString('pref.lang', l.code);
   }
 
@@ -109,6 +115,16 @@ class AppState {
       name: u.cachedName,
       avatar: u.cachedAvatar,
     );
+    // v1.4.0 — چندحسابی: بعد از هر رفرش هویت، حساب فعال در لیست حساب‌ها تازه می‌شود
+    if (u.cachedUsername.isNotEmpty && u.cookieHeader.isNotEmpty) {
+      AccountManager.I.upsertCurrent(
+        username: u.cachedUsername,
+        name: u.cachedName,
+        avatar: u.cachedAvatar,
+        id: u.cachedUserId,
+        cookie: u.cookieHeader,
+      ).catchError((_) => false);
+    }
   }
 
   /// Wipes the local session and signals RaviApp to route to /auth.
@@ -151,7 +167,11 @@ class AppState {
     _sortAndPublish(List<ChatPreview>.from(chats.value));
   }
 
-  void updatePvPreview(int chatId, String lastMessage, String lastTime, int unread, String otherUser) {
+  void updatePvPreview(int chatId, String lastMessage, String lastTime, int unread, String otherUser,
+      {String lastFileType = '',
+      String displayName = '',
+      String avatar = '',
+      bool isSelf = false}) {
     final list = List<ChatPreview>.from(chats.value);
     final i = list.indexWhere((c) => c.kind == ChatKind.pv && c.id == chatId);
     if (i >= 0) {
@@ -160,14 +180,99 @@ class AppState {
         lastTime: lastTime.isNotEmpty ? lastTime : list[i].lastTime,
         lastTs: lastTime.isNotEmpty ? lastTime : list[i].lastTs,
         unread: unread,
+        lastUser: otherUser,
+        // v1.3.2 — live GIF/music/video preview labels on the home screen
+        lastFileType: lastFileType.isNotEmpty ? lastFileType : null,
+        // سیو مسیج فقط وقتی تغییر می‌کند که خودِ ایونت صریح بگوید
+        isSelf: isSelf || list[i].isSelf,
       );
     } else {
+      // v1.5.0 — چت جدید: سطرِ کامل با اسم نمایشی + آواتار + @یوزرنیم ساخته
+      // می‌شود و یک رفرش آرامِ پس‌زمینه داده‌ی واقعی سرور را جا می‌اندازد
+      // (باگ «سطر سه‌نقطه بی‌نام و بی‌عکس»).
+      final name = displayName.trim().isNotEmpty
+          ? displayName.trim()
+          : (otherUser.isNotEmpty ? otherUser : '');
       list.insert(0, ChatPreview(
-        id: chatId, kind: ChatKind.pv, name: otherUser,
-        lastMessage: lastMessage, lastTime: lastTime, unread: unread,
+        id: chatId, kind: ChatKind.pv, name: name,
+        peerUsername: otherUser,
+        avatar: avatar,
+        lastMessage: lastMessage, lastTime: lastTime,
+        lastTs: lastTime,
+        unread: unread,
+        lastUser: otherUser,
+        lastFileType: lastFileType.isEmpty ? 'text' : lastFileType,
+        isSelf: isSelf,
       ));
+      _scheduleSilentRefresh();
     }
     _sortAndPublish(list);
+  }
+
+  /// v1.5.0 — پیش‌نمایش زنده‌ی گروه/کانال: متن/ساعت آخرین پیام + بج ناخوانده
+  /// بدون هیچ رفرشی (ایونت room_chats_updated از سرور).
+  void updateRoomPreview(String roomId, String lastMessage, String lastTime,
+      String lastFileType, int unreadDelta) {
+    final list = List<ChatPreview>.from(chats.value);
+    final i = list.indexWhere((c) =>
+        (c.kind == ChatKind.group || c.kind == ChatKind.channel) &&
+        c.roomId == roomId);
+    if (i < 0) {
+      _scheduleSilentRefresh(); // گروه تازه‌ساخته‌شده — رفرش آرام
+      return;
+    }
+    final next = (list[i].unread + unreadDelta).clamp(0, 999);
+    list[i] = list[i].copyWith(
+      lastMessage: lastMessage.isNotEmpty ? lastMessage : list[i].lastMessage,
+      lastTime: lastTime.isNotEmpty ? lastTime : list[i].lastTime,
+      lastTs: lastTime.isNotEmpty ? lastTime : list[i].lastTs,
+      lastFileType: lastFileType.isNotEmpty ? lastFileType : null,
+      unread: next,
+    );
+    _sortAndPublish(list);
+  }
+
+  // v1.5.0 — رفرش آرامِ تکراری برای «بدون رفرش»: وقتی اپ باز است هر ۳۰
+  // ثانیه یک بار لیست چت‌ها بی‌صدا از سرور تازه می‌شود. تا وقتی صفحه در
+  // پس‌زمینه است متوقف است؛ پس بار سرور ناچیز می‌ماند.
+  Timer? _autoRefreshTimer;
+  DateTime _lastSilentRefresh = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _inForeground = true;
+
+  void setAppForeground(bool v) => _inForeground = v;
+
+  void startAutoRefresh() {
+    _autoRefreshTimer?.cancel();
+    _autoRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (_inForeground && SocketService.I.connected) {
+        loadChatsCachedThenNetwork();
+      }
+    });
+  }
+
+  void stopAutoRefresh() {
+    _autoRefreshTimer?.cancel();
+    _autoRefreshTimer = null;
+  }
+
+  void _scheduleSilentRefresh() {
+    final now = DateTime.now();
+    if (now.difference(_lastSilentRefresh).inMilliseconds < 1500) return;
+    _lastSilentRefresh = now;
+    Future.delayed(const Duration(milliseconds: 900), () {
+      if (_inForeground) loadChatsCachedThenNetwork();
+    });
+  }
+
+  /// v1.1.0 — zero a chat's unread badge the moment its screen opens and
+  /// persist it, so the badge NEVER "comes back" after a refresh.
+  void zeroUnread(ChatPreview chat) {
+    final list = List<ChatPreview>.from(chats.value);
+    final i = list.indexWhere((c) => c.key == chat.key);
+    if (i < 0 || list[i].unread == 0) return;
+    list[i] = list[i].copyWith(unread: 0);
+    setChats(list);
+    _persistChats(list);
   }
 
   /// Live unread bump for a group/channel row (socket `group_unread`).
@@ -217,7 +322,10 @@ class AppState {
 
     final pinned = rest.where((c) => rank(c) < 99).toList();
     final unpinned = rest.where((c) => rank(c) == 99).toList();
-    final out = <ChatPreview>[...pinned, global, ...unpinned];
+    // v1.4.0 — سیو مسیج همیشه بالای لیست (بعد از پین‌شده‌ها، مثل تلگرام)
+    final saved = unpinned.where((c) => c.isSelf).toList();
+    final normal = unpinned.where((c) => !c.isSelf).toList();
+    final out = <ChatPreview>[...pinned, ...saved, global, ...normal];
     final marked =
         out.map((c) => c.copyWith(pinned: pinnedSet.contains(c.key))).toList();
 
@@ -228,13 +336,13 @@ class AppState {
     _persistChats(marked);
   }
 
-  // ------------------------- pinning (max 4) -------------------------
+  // ------------------------- pinning (max 5, v1.1.0) -------------------------
 
-  static const maxPinned = 4;
+  static const maxPinned = 5;
 
   List<String> get pinnedKeys => prefs.getStringList('chats.pinned') ?? <String>[];
 
-  /// Returns null on success, 'limit' when 4 chats are already pinned.
+  /// Returns null on success, 'limit' when 5 chats are already pinned.
   String? togglePin(ChatPreview chat) {
     final cur = List<String>.from(pinnedKeys);
     final k = chat.key;
@@ -250,6 +358,31 @@ class AppState {
     return null;
   }
 
+  /// v1.1.0 — Telegram-style "delete chat": drops the row from the list and
+  /// wipes its cached messages from this device (server history untouched).
+  Future<void> deleteChatLocally(ChatPreview chat) async {
+    final list = List<ChatPreview>.from(chats.value)
+      ..removeWhere((c) => c.key == chat.key);
+    final arch = List<ChatPreview>.from(archived.value)
+      ..removeWhere((c) => c.key == chat.key);
+    // clear caches
+    try {
+      if (chat.kind == ChatKind.pv) {
+        CacheService.I.put(CacheService.I.msgsKey('pv', chat.id), <Map<String, dynamic>>[]);
+      } else if (chat.kind != ChatKind.general) {
+        CacheService.I.put(CacheService.I.msgsKeyRaw('room', chat.roomId),
+            <Map<String, dynamic>>[]);
+      }
+    } catch (_) {}
+    // forget pin/archive marks
+    final pins = List<String>.from(pinnedKeys)..remove(chat.key);
+    await prefs.setStringList('chats.pinned', pins);
+    final archKeys = List<String>.from(_archivedKeys)..remove(chat.key);
+    await prefs.setStringList('chats.archived', archKeys);
+    archived.value = arch;
+    setChats(list);
+  }
+
   void _persistChats(List<ChatPreview> list) {
     CacheService.I.put(CacheService.I.chatsKey(),
         list.map((c) => {
@@ -257,7 +390,29 @@ class AppState {
       'rid': c.roomId, 'pu': c.peerUsername, 'ts': c.lastTs,
       'lm': c.lastMessage, 'lt': c.lastTime, 'lu': c.lastUser, 'u': c.unread,
       'ft': c.lastFileType,
+      'ip': c.isPro, 'io': c.isOfficial, 'self': c.isSelf,
     }).toList());
+  }
+
+  /// v1.4.0 — سوییچ به حساب دیگر (مثل تلگرام): کوکی عوض می‌شود، سوکت ری‌کانکت
+  /// و چت‌ها از نو لود می‌شوند. null یعنی ایندکس نامعتبر.
+  Future<bool> switchAccount(int index) async {
+    final acc = await AccountManager.I.switchTo(index);
+    if (acc == null) return false;
+    await ApiService.I.jar.setRaw(acc.cookie);
+    // هویت کش‌شده فوراً ست شود تا UI منتظر شبکه نمونه
+    ApiService.I.applyIdentityDirect(username: acc.username, name: acc.name, avatar: acc.avatar, id: acc.id);
+    refreshIdentity();
+    // چت‌های قدیمی پاک شوند (مال حساب قبلی‌اند)
+    setChats(<ChatPreview>[]);
+    try {
+      CacheService.I.put(CacheService.I.chatsKey(), <Map<String, dynamic>>[]);
+    } catch (_) {}
+    // سوکت با کوکی نو دوباره وصل شود
+    SocketService.I.configure(cookie: ApiService.I.cookieHeader);
+    SocketService.I.connect();
+    await loadChatsCachedThenNetwork();
+    return true;
   }
 
   /// Load chats from disk first (instant paint), then refresh from network.
@@ -281,6 +436,9 @@ class AppState {
             lastUser: '${m['lu'] ?? ''}',
             lastFileType: '${m['ft'] ?? 'text'}',
             unread: (m['u'] ?? 0) is int ? m['u'] as int : int.tryParse('${m['u']}') ?? 0,
+            isPro: m['ip'] == true,
+            isOfficial: m['io'] == true,
+            isSelf: m['self'] == true,
           );
         }).toList();
         setChats(list);
