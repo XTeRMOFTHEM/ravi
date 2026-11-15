@@ -573,7 +573,7 @@ class _MusicCover extends StatelessWidget {
                 imageUrl: url,
                 fit: BoxFit.cover,
                 memCacheWidth: 128,
-                httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                httpHeaders: ApiService.I.authHeadersFor(url),
                 errorWidget: (_, __, ___) => const _MusicGlyph(),
               )
             else
@@ -651,7 +651,7 @@ class _PlayAvatar extends StatelessWidget {
           fit: BoxFit.cover,
           width: size,
           height: size,
-          headers: {'Cookie': ApiService.I.cookieHeader},
+          headers: ApiService.I.authHeadersFor(url),
           errorBuilder: (_, __, ___) => const SizedBox.expand(),
         ),
       );

@@ -15,6 +15,8 @@ import '../chat/chat_screen.dart';
 import '../chat/photo_viewer.dart';
 import '../widgets/common.dart';
 import '../widgets/ravi_alerts.dart';
+import 'ai_chat_screen.dart';
+import 'magazine_page.dart';
 
 /// v1.0.6 — full-screen user profile rebuilt 1:1 with the web version:
 /// big cover (photo / theme / avatar-blur), avatar with a properly SCALED
@@ -44,6 +46,7 @@ class UserProfileScreen extends StatefulWidget {
 
 class _UserProfileScreenState extends State<UserProfileScreen> {
   Map<String, dynamic>? _prof;
+  List<MagazinePost> _posts = [];
   bool _loading = true;
   bool _busyFollow = false;
   bool _isFollowing = false;
@@ -56,10 +59,16 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   }
 
   Future<void> _load() async {
-    final r = await ApiService.I.userProfile(widget.username);
+    final results = await Future.wait([
+      ApiService.I.userProfile(widget.username),
+      ApiService.I.userPosts(widget.username),
+    ]);
     if (!mounted) return;
+    final r = results[0] as ApiResult<Map<String, dynamic>>;
+    final rp = results[1] as ApiResult<List<MagazinePost>>;
     setState(() {
       _prof = r.ok ? r.data : null;
+      if (rp.ok && rp.data != null) _posts = rp.data!;
       _loading = false;
       _isFollowing = _prof?['is_following'] == true;
       _iBlocked = _prof?['i_blocked_them'] == true ||
@@ -85,7 +94,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     final isVerified = _prof?['is_verified'] == true || _prof?['is_admin'] == true;
     final followers = _asInt(_prof?['followers']);
     final following = _asInt(_prof?['following']);
-    final posts = _asInt(_prof?['posts']);
+    final posts = _asInt(_prof?['posts_count'] ?? _prof?['posts']);
     final bio = '${_prof?['bio'] ?? ''}';
     final avatar = '${_prof?['avatar'] ?? ''}';
     final frameUrl = '${_prof?['avatar_frame_url'] ?? ''}';
@@ -151,7 +160,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                     child: CachedNetworkImage(
                                       imageUrl: ApiService.I.absoluteUrl(coverUrl),
                                       fit: BoxFit.cover,
-                                      httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                                      httpHeaders: ApiService.I.authHeadersFor(coverUrl),
                                     ),
                                   )
                                 : null,
@@ -527,6 +536,53 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                           ),
                         ),
                       ],
+                      if (_posts.isNotEmpty) ...[
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 18, 20, 8),
+                          child: Text(
+                            s.tabPosts,
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w800,
+                              color: p.text2,
+                            ),
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 14),
+                          child: Column(
+                            children: [
+                              for (var i = 0; i < _posts.length; i++)
+                                MagazinePostCard(
+                                  post: _posts[i],
+                                  onLike: () async {
+                                    final post = _posts[i];
+                                    final res = await ApiService.I.toggleMagazineLike(post.id);
+                                    if (!mounted || !res.ok || res.data == null) return;
+                                    setState(() {
+                                      _posts[i] = post.copyWith(
+                                        likedByMe: res.data!['liked'] == true,
+                                        likesCount: res.data!['likes_count'] is int
+                                            ? res.data!['likes_count'] as int
+                                            : post.likesCount,
+                                      );
+                                    });
+                                  },
+                                  onReplies: () async {
+                                    final d = await MagazineRepliesSheet.show(context, post: _posts[i]);
+                                    if (d != null && d > 0 && mounted) {
+                                      setState(() {
+                                        _posts[i] = _posts[i].copyWith(
+                                          repliesCount: _posts[i].repliesCount + d,
+                                        );
+                                      });
+                                    }
+                                  },
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ],
                   ),
       ),
@@ -637,27 +693,81 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         }),
         MenuItem(Icons.flag_outlined, s.reportUser, const Color(0xFFF59E0B),
             () async {
-          final ok = await showRaviModal(
-            context,
-            icon: Icons.flag_outlined,
-            iconColor: const Color(0xFFF59E0B),
-            title: s.reportUser,
-            body: s.confirmReport,
-            okText: s.reportUser,
-            cancelText: s.cancel,
-          );
-          if (ok && mounted) {
+          final reason = await _askReportReason();
+          if (reason == null || !mounted) return;
+          final res = await ApiService.I.reportUser(_u, reason: reason);
+          if (!mounted) return;
+          if (res.ok) {
             showGlassToast(context, s.reportSent,
                 icon: Icons.flag_rounded, color: const Color(0xFFF59E0B));
+          } else {
+            showGlassToast(
+              context,
+              (res.message != null && res.message!.isNotEmpty) ? res.message! : s.error,
+              icon: Icons.error_outline_rounded,
+              color: const Color(0xFFEF4444),
+            );
           }
         }),
         MenuItem(Icons.auto_awesome_rounded, s.chatMenuAI,
             const Color(0xFF8B5CF6), () {
-          showGlassToast(context, s.aiComingSoon,
-              icon: Icons.auto_awesome_rounded, color: const Color(0xFF8B5CF6));
+          Navigator.of(context, rootNavigator: true).push(AiChatScreen.route());
         }),
       ],
     );
+  }
+
+  Future<String?> _askReportReason() async {
+    final p = Theme.of(context).brightness == Brightness.dark
+        ? const Palette.dark()
+        : const Palette.light();
+    final s = AppState.I.str;
+    final ctl = TextEditingController();
+    final res = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: p.bgCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text(s.reportUser, style: TextStyle(color: p.text, fontWeight: FontWeight.w800)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(s.confirmReport, style: TextStyle(fontSize: 13, color: p.text2)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ctl,
+              maxLength: 300,
+              maxLines: 3,
+              style: TextStyle(fontSize: 13.5, color: p.text),
+              decoration: InputDecoration(
+                hintText: s.reportReasonHint,
+                hintStyle: TextStyle(color: p.text3, fontSize: 13),
+                filled: true,
+                fillColor: p.bgSoft,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(s.cancel),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFFF59E0B)),
+            onPressed: () => Navigator.pop(ctx, ctl.text.trim()),
+            child: Text(s.reportUser),
+          ),
+        ],
+      ),
+    );
+    ctl.dispose();
+    return res;
   }
 
   Future<void> _toggleBlock() async {
@@ -1296,7 +1406,7 @@ class _CustomizeProfileSheetState extends State<CustomizeProfileSheet> {
                   ? CachedNetworkImage(
                       imageUrl: ApiService.I.absoluteUrl(coverUrl),
                       fit: BoxFit.cover,
-                      httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                      httpHeaders: ApiService.I.authHeadersFor(coverUrl),
                     )
                   : null,
             ),
@@ -1471,7 +1581,7 @@ class _CustomizeProfileSheetState extends State<CustomizeProfileSheet> {
                             imageUrl: ApiService.I
                                 .absoluteUrl(ProPresets.frameUrl(key)),
                             fit: BoxFit.contain,
-                            httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                            httpHeaders: ApiService.I.authHeadersFor(ProPresets.frameUrl(key)),
                           ),
                         ),
                 ),

@@ -6,18 +6,18 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
 import 'api_service.dart';
+import 'storage_service.dart';
 
-/// v1.2.1 — TELEGRAM-STYLE MEDIA DOWNLOAD ENGINE for audio messages.
-///
-/// Telegram never streams an audio file blind: the file is downloaded to the
-/// cache with a live progress indicator (the sweeping ring around the
-/// bubble), then played from disk. This service does exactly that:
-///
-///  • one download per URL (concurrent callers await the same job)
-///  • live progress via ValueNotifier (0..1) — the UI subscribes
-///  • instant no-op when the file is already cached
+/// Telegram-style audio download & disk cache engine:
+/// • Stable FNV-1a file naming (survives Dart isolate restarts)
+/// • Stored in persistent Application Documents (`ravi_audio_cache`) and
+///   integrated with [StorageService] breakdown & clearing
+/// • Same-origin cookie gating via `ApiService.I.authHeadersFor`
+/// • Tracks downloaded bytes in [NetStats]
 class AudioCacheService {
-  AudioCacheService._();
+  AudioCacheService._() {
+    StorageService.registerClearHook(evictAll);
+  }
   static final AudioCacheService I = AudioCacheService._();
 
   final Map<String, ValueNotifier<double>> _progress = {};
@@ -25,19 +25,33 @@ class AudioCacheService {
   final Map<String, Future<String?>> _jobs = {};
   Directory? _dir;
 
+  void evictAll() {
+    _paths.clear();
+    for (final n in _progress.values) {
+      n.value = 0;
+    }
+  }
+
   Future<Directory> _cacheDir() async {
     if (_dir != null) return _dir!;
-    final base = await getTemporaryDirectory();
-    final d = Directory('${base.path}/ravi_audio_cache');
-    if (!await d.exists()) await d.create(recursive: true);
-    _dir = d;
-    return d;
+    try {
+      final base = await getApplicationDocumentsDirectory();
+      final d = Directory('${base.path}/ravi_audio_cache');
+      if (!await d.exists()) await d.create(recursive: true);
+      _dir = d;
+      return d;
+    } catch (_) {
+      final base = await getTemporaryDirectory();
+      final d = Directory('${base.path}/ravi_audio_cache');
+      if (!await d.exists()) await d.create(recursive: true);
+      _dir = d;
+      return d;
+    }
   }
 
   bool isCached(String url) {
     final p = _paths[url];
     if (p != null && _okFile(p)) return true;
-    // accept a previous session's file on disk too
     if (_dir != null) {
       final guess = '${_dir!.path}/${_fileName(url)}';
       if (_okFile(guess)) {
@@ -48,7 +62,6 @@ class AudioCacheService {
     return false;
   }
 
-  // فایل خالی/نیمه‌کاره «کش‌شده» حساب نمی‌شود (باگ پخش‌نشدن آهنگ بعد از دانلود ناقص)
   bool _okFile(String path) {
     try {
       final f = File(path);
@@ -66,21 +79,18 @@ class AudioCacheService {
   ValueNotifier<double> progressOf(String url) =>
       _progress.putIfAbsent(url, () => ValueNotifier(0));
 
-  /// (بایت‌های دریافت‌شده، کل بایت‌ها) — برای «3.2 / 12.5 MB»
   final Map<String, ValueNotifier<(int, int)>> _bytes = {};
   ValueNotifier<(int, int)> bytesOf(String url) =>
       _bytes.putIfAbsent(url, () => ValueNotifier((0, 0)));
 
   final Map<String, TransferCancelToken> _tokens = {};
 
-  /// لغو دانلودِ در حال انجام (✕ روی دکمه‌ی پخش)
   void cancel(String url) => _tokens[url]?.cancel();
 
   bool wasCancelled(String url) => _tokens[url]?.isCancelled ?? false;
 
-  /// Download [url] (a /static/... path or absolute) into the cache.
-  /// Returns the local file path, or null on failure.
   Future<String?> ensureDownloaded(String url) async {
+    await _cacheDir();
     if (isCached(url)) return _paths[url];
     final existing = _jobs[url];
     if (existing != null) return existing;
@@ -105,13 +115,12 @@ class AudioCacheService {
       final abs = ApiService.I.absoluteUrl(url);
       final dir = await _cacheDir();
       final path = '${dir.path}/${_fileName(url)}';
-      // اول در فایل .part نوشته می‌شود؛ فقط بعد از دانلود کامل rename می‌شود
       tmp = File('$path.part');
       notifier.value = 0;
       bytes.value = (0, 0);
       client = http.Client();
       final req = http.Request('GET', Uri.parse(abs));
-      req.headers['Cookie'] = ApiService.I.cookieHeader;
+      req.headers.addAll(ApiService.I.authHeadersFor(abs));
       req.followRedirects = true;
       final res =
           await client.send(req).timeout(const Duration(seconds: 60));
@@ -123,6 +132,7 @@ class AudioCacheService {
       await for (final chunk in res.stream) {
         if (token.isCancelled) throw const TransferCancelled();
         received += chunk.length;
+        NetStats.I.addReceived(chunk.length);
         sink.add(chunk);
         final now = DateTime.now();
         if (now.difference(last).inMilliseconds >= 100) {
@@ -153,15 +163,25 @@ class AudioCacheService {
       return null;
     } finally {
       client?.close();
-      // توکن تا خوانده‌شدنِ wasCancelled نگه داشته می‌شود و دانلود بعدی عوضش می‌کند
     }
+  }
+
+  /// Deterministic FNV-1a 32-bit hash (unlike Dart's salted `hashCode`).
+  static String _stableHash(String input) {
+    var h = 0x811c9dc5;
+    for (final c in input.codeUnits) {
+      h ^= c & 0xff;
+      h = (h * 0x01000193) & 0x7fffffff;
+      h ^= (c >> 8) & 0xff;
+      h = (h * 0x01000193) & 0x7fffffff;
+    }
+    return h.toRadixString(36);
   }
 
   String _fileName(String url) {
     final clean = url.split('?').first;
-    final last = clean.split('/').last;
-    return last.isEmpty
-        ? 'audio_${clean.hashCode}'
-        : 'a_${clean.hashCode}_$last';
+    final rawLast = clean.split('/').last.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    final h = _stableHash(clean);
+    return rawLast.isEmpty ? 'audio_$h.m4a' : 'a_${h}_$rawLast';
   }
 }

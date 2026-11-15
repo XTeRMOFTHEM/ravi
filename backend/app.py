@@ -9,9 +9,30 @@ from flask import session
 import requests
 import subprocess
 import os
+import sys
 import threading
 import time as _time
 from collections import defaultdict, deque
+
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
+from security import (
+    BANNED_UPLOAD_EXTS,
+    is_safe_upload_url,
+    resolve_upload_path,
+    safe_redirect_target,
+    safe_remove_upload_file,
+    sanitize_client_file_type,
+    sanitize_client_file_url,
+    sanitize_upload_ext,
+)
+from magazine import (
+    get_user_posts_count,
+    init_magazine_tables,
+    register_magazine_routes,
+)
 try:
     import imageio_ffmpeg
     FFMPEG_BIN = imageio_ffmpeg.get_ffmpeg_exe()
@@ -29,20 +50,36 @@ app = Flask(__name__)
 
 def _load_or_create_secret():
     """کلید امنیتی پایدار: اول متغیر محیطی، بعد فایل .secret محلی — تا سشن‌ها با هر ری‌استارت نپاشن"""
-    env = os.environ.get('XYPHER_SECRET_KEY')
-    if env: return env
+    env = (
+        os.environ.get('RAVI_SECRET_KEY')
+        or os.environ.get('XYPHER_SECRET_KEY')
+        or os.environ.get('SECRET_KEY')
+    )
+    if env:
+        return env
+    secret_path = os.path.join(_BACKEND_DIR, '.secret')
     try:
-        if os.path.exists('.secret'):
-            with open('.secret') as f: s = f.read().strip()
-            if s: return s
+        if os.path.exists(secret_path):
+            with open(secret_path) as f:
+                s = f.read().strip()
+            if s:
+                return s
         s = secrets.token_hex(32)
-        with open('.secret', 'w') as f: f.write(s)
+        with open(secret_path, 'w') as f:
+            f.write(s)
+        try:
+            os.chmod(secret_path, 0o600)
+        except OSError:
+            pass
         return s
     except Exception:
         return secrets.token_hex(32)
 
 app.config['SECRET_KEY'] = _load_or_create_secret()
-app.config['UPLOAD_FOLDER'] = 'static/uploads'
+app.config['UPLOAD_FOLDER'] = os.environ.get(
+    'RAVI_UPLOAD_FOLDER',
+    os.path.join(_BACKEND_DIR, 'static', 'uploads'),
+)
 app.config['MAX_CONTENT_LENGTH'] = 210 * 1024 * 1024  # v1.4.0: ۲۱۰MB — ویدئوی حجیم مثل تلگرام
 
 # ==================== v1.3.1 — بهینه‌سازی‌های سرعت HTTP ====================
@@ -79,7 +116,7 @@ def _ravi_gzip_response(resp):
         pass
     return resp
 
-DB_PATH = 'chat.db'
+DB_PATH = os.environ.get('RAVI_DB_PATH', os.path.join(_BACKEND_DIR, 'chat.db'))
 _DB_LOCAL = threading.local()
 
 class _ReuseConn(object):
@@ -181,18 +218,65 @@ _GET_MUTATING_PREFIXES = ('/block_user/', '/unblock_user/', '/report_user/', '/f
 # تنها مسیرهایی که اجازه‌ی بدنه‌ی بزرگ دارند
 _UPLOAD_PATHS = {'/upload_image', '/upload_gif', '/upload_chat_bg', '/upload_profile_cover', '/edit_profile'}
 
+def _can_access_uploaded_file(filename: str) -> bool:
+    """بررسی دسترسی کاربر جاری به فایل آپلودشده:
+    فایل‌های پیوست‌شده به پیوی یا روم خصوصی فقط برای اعضای همان چت/روم مجازند."""
+    if not current_user.is_authenticated:
+        return False
+    if current_user.is_admin:
+        return True
+    name = filename.replace('\\', '/').lstrip('/')
+    url_static = f'/static/uploads/{name}'
+    url_files = f'/files/{name}'
+    try:
+        conn = db_conn()
+        c = conn.cursor()
+        c.execute(
+            '''SELECT room, private_chat_id FROM messages
+               WHERE is_deleted = 0 AND (file_url = ? OR file_url = ?)
+               LIMIT 10''',
+            (url_static, url_files),
+        )
+        refs = c.fetchall()
+        conn.close()
+    except Exception:
+        return False
+    if not refs:
+        # آواتار، کاور پروفایل، پس‌زمینه چت، عکس مجله یا گیف — برای کاربران لاگین‌شده قابل نمایش است
+        return True
+    for room, pv_id in refs:
+        if pv_id:
+            if _is_pv_member(pv_id, current_user.id):
+                return True
+        elif not room or room == 'general':
+            return True
+        elif str(room).startswith('private_'):
+            robj = get_room_by_id(str(room)[len('private_'):])
+            if robj and is_room_member(current_user.id, robj['id']):
+                return True
+    return False
+
 @app.before_request
 def _ravi_security_gate():
-    """مقیاس‌پذیری + امنیت: (۱) محدودیت تلاش ورود (۲) بررسی Origin برای متدهای تغییردهنده"""
+    """مقیاس‌پذیری + امنیت (Fail-Closed):
+    (۱) محافظت از فایل‌های /static/uploads/ با احراز هویت و کنترل عضویت چت
+    (۲) محدودیت حجم بدنه در مسیرهای غیرآپلود
+    (۳) محافظت CSRF و ریت‌لیمیت ورود"""
     try:
         p = (request.path or '')
+        if p.startswith('/static/uploads/'):
+            rel = p[len('/static/uploads/'):]
+            if rel != 'default.png':
+                if not current_user.is_authenticated:
+                    return jsonify({'error': 'unauthorized'}), 401
+                if not _can_access_uploaded_file(rel):
+                    return jsonify({'error': 'forbidden'}), 403
         # v1.6 — درخواست‌های غیرآپلود بدنه‌ی بزرگ نمی‌گیرند (MAX_CONTENT_LENGTH سراسری ۲۱۰MB بود)
         if request.method in ('POST', 'PUT') and p not in _UPLOAD_PATHS and not p.endswith('/set_avatar'):
             cl = request.content_length
             if cl and cl > 2 * 1024 * 1024:
                 return jsonify({'error': 'حجم درخواست زیاد است'}), 413
-        # v1.6 — مسیرهای GET تغییردهنده: اگر مرورگر نشان دهد از <img>/<iframe>/<script> یا از سایت دیگر
-        # آمده، رد شود. کلاینت اندروید این هدرها را نمی‌فرستد => تغییری برای اپ ایجاد نمی‌شود.
+        # v1.6 — مسیرهای GET تغییردهنده: جلوگیری از درخواست cross-site
         if request.method == 'GET' and p.startswith(_GET_MUTATING_PREFIXES):
             sfs = request.headers.get('Sec-Fetch-Site') or ''
             sfd = request.headers.get('Sec-Fetch-Dest') or ''
@@ -202,8 +286,6 @@ def _ravi_security_gate():
             key = (_rate_ip(), (request.form.get('username') or '').strip().lower())
             if not _login_rate_ok(key):
                 return jsonify({'error': 'تلاش‌های زیاد ناموفق؛ ۵ دقیقه صبر کنید'}), 429
-        # CSRF سبک: اگر Origin/Referer آمد و با هاست ما فرق داشت، رد کن
-        # (کلاینت اندروید هدر Origin نمی‌فرستد؛ مرورگر همیشه می‌فرستد)
         if request.method in ('POST', 'PUT', 'DELETE') and not p.startswith('/socket.io'):
             origin = request.headers.get('Origin') or ''
             if origin:
@@ -211,7 +293,8 @@ def _ravi_security_gate():
                 if origin not in ('http://' + host, 'https://' + host):
                     return jsonify({'error': 'درخواست غیرمجاز'}), 403
     except Exception:
-        pass
+        # Fail-closed: در صورت بروز خطای غیرمنتظره درخواست مسدود شود
+        return jsonify({'error': 'security_gate_error'}), 403
     return None
 
 # v1.6 — با متغیر محیطی XYPHER_CORS_ORIGINS (جداشده با کاما) می‌توان مبدأهای مجاز سوکت را محدود کرد؛
@@ -268,9 +351,7 @@ def optimize_db():
             conn.commit()
             conn.close()
         except Exception:
-            pass  # جدول هنوز ساخته نشده — بعد از init_db دوباره اجرا میشه
-
-optimize_db()
+            pass  # جدول هنوز ساخته نشده — بعد از init_db و upgrade_db اجرا می‌شود
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v', '3gp',
                        'mp3', 'wav', 'ogg', 'oga', 'm4a', 'aac', 'opus', 'flac', 'm4r',
@@ -680,33 +761,44 @@ def upgrade_db():
 
 upgrade_db()
 optimize_db()  # v1.3.1 — بعد از upgrade_db هم اجرا می‌شود: ستون‌هایی مثل client_msg_id/reply_to حالا موجودند و ایندکس‌های روی آن‌ها ساخته می‌شوند
+init_magazine_tables(db_conn)
 
 # ==================== توابع دیتابیس ====================
+
+_USER_SELECT_COLS = (
+    "id, username, gender, password, bio, avatar, is_admin, is_banned, created_at, "
+    "chat_bg, profile_theme, profile_cover, avatar_frame, card_color, name, "
+    "privacy_last_seen, privacy_dm, last_seen, session_epoch"
+)
 
 def get_user(username=None, user_id=None):
     conn = db_conn()
     c = conn.cursor()
-    if username: c.execute("SELECT * FROM users WHERE username = ?", (username,))
-    else: c.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    if username:
+        c.execute(f"SELECT {_USER_SELECT_COLS} FROM users WHERE LOWER(username) = LOWER(?)", (username,))
+    else:
+        c.execute(f"SELECT {_USER_SELECT_COLS} FROM users WHERE id = ?", (user_id,))
     user = c.fetchone()
     conn.close()
     if user:
+        try:
+            ep = int(user[18] or 0)
+        except (TypeError, ValueError):
+            ep = 0
         return {
             'id': user[0], 'username': user[1], 'gender': user[2] or 'other',
             'password': user[3], 'bio': user[4] or '', 'avatar': user[5] or 'default.png',
             'is_admin': user[6], 'is_banned': user[7], 'created_at': user[8],
-            'chat_bg': (user[9] if len(user) > 9 else '') or '',
-            'profile_theme': (user[10] if len(user) > 10 else 'default') or 'default',
-            'profile_cover': (user[11] if len(user) > 11 else '') or '',
-            'avatar_frame': (user[12] if len(user) > 12 else '') or '',
-            'card_color': (user[13] if len(user) > 13 else '') or '',
-            'name': (user[14] if len(user) > 14 else '') or user[1],
-            'privacy_last_seen': (user[15] if len(user) > 15 and user[15] else 'all') or 'all',
-            'privacy_dm': (user[16] if len(user) > 16 and user[16] else 'all') or 'all',
-            'last_seen': (user[17] if len(user) > 17 else None),
-            # v1.4.0 — نسل نشست: با «خروج از همه دستگاه‌ها» افزایش می‌یابد و
-            # کوکی‌های قدیمی بلافاصله بی‌اعتبار می‌شوند (قبلاً revoke صرفاً نمایشی بود)
-            'session_epoch': (user[18] if len(user) > 18 and user[18] is not None else 0) or 0
+            'chat_bg': user[9] or '',
+            'profile_theme': user[10] or 'default',
+            'profile_cover': user[11] or '',
+            'avatar_frame': user[12] or '',
+            'card_color': user[13] or '',
+            'name': user[14] or user[1],
+            'privacy_last_seen': user[15] or 'all',
+            'privacy_dm': user[16] or 'all',
+            'last_seen': user[17],
+            'session_epoch': ep,
         }
     return None
 
@@ -740,8 +832,8 @@ def get_room_members_full(room_db_id):
     members = c.fetchall()
     conn.close()
     return [{
-        'id': m[0], 'username': m[1], 'avatar': m[2], 'global_admin': m[3],
-        'is_owner': m[4], 'is_room_admin': bool(m[5]), 'joined_at': m[6],
+        'id': m[0], 'username': m[1], 'avatar': m[2], 'global_admin': bool(m[3]),
+        'is_owner': bool(m[4]), 'is_room_admin': bool(m[5]), 'joined_at': m[6],
         'admin_title': m[7] or '', 'promoted_by': m[8]
     } for m in members]
 
@@ -755,10 +847,10 @@ def is_room_admin(room_db_id, user_id):
     return result is not None
 
 def is_room_owner(room_db_id, user_id):
-    """چک کن کاربر مالک روم هست یا نه"""
+    """چک کن کاربر واقعاً مالک این روم هست یا نه (مقایسه دقیق با private_rooms.owner_id)"""
     conn = db_conn()
     c = conn.cursor()
-    c.execute("SELECT 1 FROM room_members WHERE room_id = ? AND user_id = ? AND is_admin = 1", (room_db_id, user_id))
+    c.execute("SELECT 1 FROM private_rooms WHERE id = ? AND owner_id = ? AND is_active = 1", (room_db_id, user_id))
     result = c.fetchone()
     conn.close()
     return result is not None
@@ -952,7 +1044,7 @@ def get_room_unread(user_id, room_db_id, room_str):
     last = row[0] if row else 0
     c.execute('''SELECT COUNT(*) FROM messages
                  WHERE room = ? AND id > ? AND user_id != ? AND is_deleted = 0
-                 AND (file_type IS NULL OR file_type = '' OR file_type = 'text' OR file_type IN ('image','video','audio','gif'))''',
+                 AND (file_type IS NULL OR file_type = '' OR file_type = 'text' OR file_type IN ('image','video','audio','gif','file'))''',
               (room_str, last, user_id))
     n = c.fetchone()[0]; conn.close()
     return n
@@ -1149,15 +1241,9 @@ def delete_message_db(message_id, user_id, is_admin=False, force=False):
     c.execute("""UPDATE messages SET is_deleted = 1, deleted_by = ?, deleted_at = ? 
                  WHERE id = ?""", (user_id, datetime.now(), message_id))
     
-    # اگه عکس یا ویدیو داشت، فایلش رو هم پاک کن — ولی فقط اگه هیچ رفرنس دیگه‌ای نمونده باشه
-    # (این شرط باعث میشه گیف‌های گالری با حذف یه پیام، ناپدید نشن)
-    if file_url and file_url.startswith('/static/uploads/'):
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], file_url.replace('/static/uploads/', ''))
-        if os.path.exists(filepath) and not file_still_in_use(conn, file_url):
-            try:
-                os.remove(filepath)
-            except:
-                pass
+    # اگه عکس یا ویدیو داشت، فایلش رو هم پاک کن — امن در برابر path traversal و رفرنس‌های مشترک
+    if file_url and is_safe_upload_url(file_url) and not file_still_in_use(conn, file_url):
+        safe_remove_upload_file(app.config['UPLOAD_FOLDER'], file_url)
     
     conn.commit()
     conn.close()
@@ -1168,25 +1254,19 @@ def delete_all_messages_db(room='general'):
     conn = db_conn()
     c = conn.cursor()
     
-    # پاک کردن فایل‌های آپلود شده — فقط فایل‌هایی که هیچ رفرنس دیگه‌ای ندارن
-    # (گیف‌های گالری و رسانه‌ی پیام‌های دیگه محافظت می‌شن)
-    c.execute("SELECT file_url FROM messages WHERE room = ? AND file_url IS NOT NULL AND is_deleted = 0", (room,))
-    files = c.fetchall()
-    for f in files:
-        if f[0] and f[0].startswith('/static/uploads/'):
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], f[0].replace('/static/uploads/', ''))
-            if os.path.exists(filepath) and not file_still_in_use(conn, f[0]):
-                try:
-                    os.remove(filepath)
-                except:
-                    pass
-    
-    # حذف همه پیام‌ها
+    c.execute("SELECT DISTINCT file_url FROM messages WHERE room = ? AND file_url IS NOT NULL AND is_deleted = 0", (room,))
+    files = [r[0] for r in c.fetchall() if r[0]]
+
+    # اول رکوردها حذف نرم شوند تا file_still_in_use رفرنس‌های همین روم را نشمارد
     c.execute("UPDATE messages SET is_deleted = 1, deleted_at = ? WHERE room = ? AND is_deleted = 0", 
               (datetime.now(), room))
-    
     count = c.rowcount
     conn.commit()
+
+    for furl in files:
+        if is_safe_upload_url(furl) and not file_still_in_use(conn, furl):
+            safe_remove_upload_file(app.config['UPLOAD_FOLDER'], furl)
+    
     conn.close()
     return count
 
@@ -1394,11 +1474,20 @@ def announce_room_service_event(room, actor_user_id, actor_username, actor_avata
     if not room: return
     room_name = f"private_{room['room_id']}"   # کلید روم همه‌جا با room_id رشته‌ایه
     count = get_room_member_count(room['id'])
-    # شمارنده‌ی اعضا برای همه‌ی کلاینت‌ها (لیست چت‌ها + پنل اطلاعات) تازه بشه
-    socketio.emit('room_member_update', {
+    # شمارنده‌ی اعضا فقط به خود روم و اعضای واقعی آن ارسال می‌شود (عدم افشای کد روم خصوصی در general)
+    member_payload = {
         'room_id': room['room_id'], 'member_count': count,
         'action': action, 'username': actor_username
-    }, room='general')
+    }
+    socketio.emit('room_member_update', member_payload, room=room_name)
+    try:
+        _cm = db_conn(); _curm = _cm.cursor()
+        _curm.execute("SELECT user_id FROM room_members WHERE room_id = ?", (room['id'],))
+        for (_mid,) in _curm.fetchall():
+            socketio.emit('room_member_update', member_payload, room=f"user_{_mid}")
+        _cm.close()
+    except Exception:
+        pass
     # فقط و فقط در کانال‌ها هیچ پیام شیشه‌ای عضویت/لفت وجود نداره —
     # هرچی هست از توی کانال‌ها برداشته میشه؛ شمارنده‌ی اعضا بالا همچنان به‌روز میشه
     if room.get('room_type') == 'channel':
@@ -1674,7 +1763,7 @@ def get_user_private_chats(user_id):
                  CASE WHEN pc.sender_id = ? THEN u2.is_admin ELSE u1.is_admin END as other_official,
                  CASE WHEN pc.sender_id = ? THEN u2.id ELSE u1.id END as other_id,
                  pc.sender_id, pc.unread_s, pc.unread_r,
-                 pc.last_file_type, pc.last_user
+                 pc.last_file_type, pc.last_user, pc.receiver_id, pc.updated_at
                  FROM private_chats pc
                  JOIN users u1 ON pc.sender_id = u1.id
                  JOIN users u2 ON pc.receiver_id = u2.id
@@ -1683,8 +1772,6 @@ def get_user_private_chats(user_id):
               (user_id, user_id, user_id, user_id, user_id, user_id, user_id))
     chats = c.fetchall()
     tag_map = batch_user_tags([c_[8] for c_ in chats])
-    # v1.3.2 — ستاره‌ی PRO واقعی طرف مقابل (قبلاً همیشه False بود):
-    # همه‌ی پروها با «یک» کوئری، بدون N+1.
     pro_ids = set()
     if chats:
         ids = list({c_[8] for c_ in chats if c_[8]})
@@ -1697,19 +1784,16 @@ def get_user_private_chats(user_id):
     conn.close()
     out = []
     for c_ in chats:
-        # ناخوانده‌ی واقعی: من فرستنده‌ام => ستون فرستنده، من گیرنده‌ام => ستون گیرنده
         unread = (c_[10] if c_[9] == user_id else c_[11]) or 0
+        raw_ts = c_[2] or c_[15] or ''
         out.append({'id': c_[0], 'last_message': c_[1],
-                    # v1.5.0 — last_time همیشه «HH:MM» خالص برمی‌گردد؛ قبلاً
-                    # datetime خام با میلی‌ثانیه («09:23:45.123456») به اپ
-                    # می‌رسید و سطر لیست چت‌ها ساعتِ کثیف نشان می‌داد
-                    'last_time': fmt_hhmm(c_[2]), 'unread_count': unread,
+                    'last_time': fmt_hhmm(raw_ts),
+                    'last_time_iso': str(raw_ts),
+                    'unread_count': unread,
                     'other_user': c_[4], 'other_avatar': c_[5], 'other_name': (c_[6] or '').strip(),
                     'other_official': bool(c_[7]), 'other_pro': c_[8] in pro_ids, 'other_id': c_[8],
-                    # v1.4.0 — سیو مسیج: چتِ با خودمان (sender == receiver) تا کلاینت آیکون
-                    # بوکمارک و عنوان «پیام‌های ذخیره‌شده» مثل تلگرام نشان دهد
-                    'is_self': bool(c_[9] == c_[8]),
-                    # v1.3.0 — نوع آخرین پیام: پیش‌نمایش خالی برای عکس/ویس/فایل دیگه نمی‌مونه
+                    # FIX: Saved Messages فقط وقتی است که sender_id == receiver_id باشد
+                    'is_self': bool(c_[9] == c_[14]),
                     'other_tags': tag_map.get(c_[8], []),
                     'last_file_type': c_[12] if len(c_) > 12 else '',
                     'last_user': c_[13] if len(c_) > 13 else ''})
@@ -1723,7 +1807,7 @@ def get_private_chat_messages(chat_id, limit=60, before_id=None):
                  (SELECT COUNT(*) FROM message_reads mr 
                   WHERE mr.message_id = m.id 
                   AND mr.user_id != m.user_id) as read_count,
-                 m.reply_to, m.forward_from, m.forward_from_username, m.media_meta
+                 m.reply_to, m.forward_from, m.forward_from_username, m.media_meta, m.is_edited
                  FROM messages m JOIN users u ON m.user_id = u.id
                  WHERE m.private_chat_id = ? AND m.is_deleted = 0'''
     params = [chat_id]
@@ -1734,7 +1818,7 @@ def get_private_chat_messages(chat_id, limit=60, before_id=None):
     params.append(limit)
     c.execute(q, params)
     msgs = c.fetchall()
-    msgs.reverse()  # به ترتیب زمانی (قدیم به جدید) برای نمایش
+    msgs.reverse()
 
     reactions_map = get_reactions_for_messages([m[0] for m in msgs])
 
@@ -1746,6 +1830,7 @@ def get_private_chat_messages(chat_id, limit=60, before_id=None):
              'date_label': date_label_of(m[3]),
              'avatar': m[4], 'file_url': m[5], 'file_type': m[6],
              'is_read': m[7] > 0,
+             'is_edited': bool(m[12]) if len(m) > 12 else False,
              'forward_from': m[9] or '', 'forward_from_username': m[10] or '',
              'reactions': reactions_map.get(m[0], []),
              'media_meta': norm_media_meta_out(m[11] if len(m) > 11 else None, m[5] or '', m[6] or '')}
@@ -1923,7 +2008,8 @@ def _token_valid(token, user_id):
             c.execute("UPDATE login_tokens SET last_active = ? WHERE token = ?", (datetime.now(), token))
             conn.commit()
     except Exception:
-        return True   # خرابی لحظه‌ای دیتابیس نباید همه را logout کند
+        # Fail-closed: خطای بررسی توکن هرگز نباید نشست را معتبر فرض کند
+        return False
     if len(_token_cache) > 20000: _token_cache.clear()
     _token_cache[token] = (now, ok)
     return ok
@@ -1991,9 +2077,18 @@ class UserClass:
         self.name = user_data.get('name', '') or user_data['username']
         self.session_epoch = int(user_data.get('session_epoch', 0) or 0)
 
-    def is_authenticated(self): return True
-    def is_active(self): return not self.is_banned
-    def is_anonymous(self): return False
+    @property
+    def is_authenticated(self):
+        return True
+
+    @property
+    def is_active(self):
+        return not self.is_banned
+
+    @property
+    def is_anonymous(self):
+        return False
+
     def get_id(self):
         # v1.4.0 — epoch داخل شناسه‌ی کوکی می‌نشیند؛ افزایش epoch => کوکی‌های قبلی مرده‌اند
         return f"{self.id}.{self.session_epoch}"
@@ -2044,6 +2139,38 @@ def index():
                                is_pro=is_pro_user(current_user.id))
     return redirect(url_for('login'))
 
+@app.route('/api/me')
+@login_required
+def api_me():
+    """هویت کامل کاربر جاری به صورت JSON (جایگزین ایمن و بدون وابستگی به HTML scraping)"""
+    u = get_user(user_id=current_user.id)
+    if not u:
+        return jsonify({'error': 'not_found'}), 404
+    is_pro = is_pro_user(u['id'])
+    follow_counts = get_follow_counts(u['id'])
+    return jsonify({
+        'id': u['id'],
+        'username': u['username'],
+        'name': u['name'],
+        'bio': u['bio'],
+        'gender': u['gender'],
+        'avatar': u['avatar'],
+        'chat_bg': u['chat_bg'],
+        'profile_theme': u['profile_theme'],
+        'profile_cover': f"/static/uploads/{u['profile_cover']}" if (is_pro and u['profile_cover']) else '',
+        'avatar_frame': u['avatar_frame'],
+        'avatar_frame_url': f"/static/frames/{AVATAR_FRAMES[u['avatar_frame']]['file']}" if (is_pro and u['avatar_frame'] in AVATAR_FRAMES) else '',
+        'card_color': u['card_color'],
+        'is_pro': bool(is_pro),
+        'is_official': bool(u['is_admin']),
+        'is_admin': bool(u['is_admin']),
+        'privacy_last_seen': u['privacy_last_seen'],
+        'privacy_dm': u['privacy_dm'],
+        'followers': follow_counts['followers'],
+        'following': follow_counts['following'],
+        'posts_count': get_user_posts_count(db_conn, u['id']),
+    })
+
 # ==================== هلپرهای فرمت تاریخ/ساعت (مشترک بین پیوی و گروه) ====================
 def fmt_hhmm(raw_ts):
     if not raw_ts:
@@ -2092,7 +2219,7 @@ def api_general_messages():
                  m.reply_to, m.forward_from, m.forward_from_username,
                  u.name,
                  (SELECT COUNT(*) FROM pro_accounts pa WHERE pa.user_id = u.id AND pa.is_active = 1),
-                 u.is_admin, m.media_meta
+                 u.is_admin, m.media_meta, m.is_edited
                  FROM messages m JOIN users u ON m.user_id = u.id
                  WHERE m.room = 'general' AND m.private_chat_id IS NULL AND m.is_deleted = 0'''
     params = []
@@ -2103,6 +2230,7 @@ def api_general_messages():
     params.append(limit)
     c.execute(q, params)
     rows = c.fetchall()
+    reactions_map = get_reactions_for_messages([r[0] for r in rows])
     messages = []
     for r in rows[::-1]:
         d = {'message_id': r[0], 'message': r[1], 'username': r[2],
@@ -2110,10 +2238,11 @@ def api_general_messages():
              'date_key': date_key_of(r[3]), 'date_label': date_label_of(r[3]),
              'avatar': r[4], 'file_url': r[5], 'file_type': r[6],
              'forward_from': r[8] or '', 'forward_from_username': r[9] or '',
-             # v1.2.1 — GLOBAL chat finally gets real names + badges
              'display_name': (r[10] or '').strip(),
              'is_pro': bool(r[11]),
              'is_official': bool(r[12]),
+             'is_edited': bool(r[14]) if len(r) > 14 else False,
+             'reactions': reactions_map.get(r[0], []),
              'media_meta': norm_media_meta_out(r[13], r[5] or '', r[6] or ''),
              'is_me': r[2] == current_user.username}
         if r[7]:
@@ -2126,6 +2255,7 @@ def api_general_messages():
 def register():
     if request.method == 'POST':
         username = (request.form.get('username') or '').strip()
+        display_name = (request.form.get('name') or '').strip()[:100]
         gender = request.form.get('gender', 'other')
         password = request.form.get('password') or ''
         # v1.4.0 — اعتبارسنجی سمت سرور: نام کاربری و رمز عبور قوی‌تر
@@ -2145,8 +2275,10 @@ def register():
         conn = db_conn(); c = conn.cursor()
         hashed = generate_password_hash(password)
         is_admin = 1 if c.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0 else 0
-        c.execute("INSERT INTO users (username, gender, password, is_admin, created_at) VALUES (?, ?, ?, ?, ?)",
-          (username, gender, hashed, is_admin, datetime.now()))
+        c.execute(
+            "INSERT INTO users (username, name, gender, password, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (username, display_name or username, gender, hashed, is_admin, datetime.now()),
+        )
         conn.commit(); user_id = c.lastrowid; conn.close()
         user_data = get_user(user_id=user_id)
         session.clear()  # ضد session fixation
@@ -2173,7 +2305,7 @@ def login():
         flash('اطلاعات نادرست است')
     return render_template('login.html')
 
-@app.route('/logout')
+@app.route('/logout', methods=['GET', 'POST'])
 @login_required
 def logout():
     try:
@@ -2182,15 +2314,19 @@ def logout():
     except Exception:
         pass
     logout_user()
+    if request.method == 'POST' or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        return jsonify({'success': True})
     return redirect(url_for('login'))
 
 @app.route('/api/user_exists/<username>')
+@login_required
 def api_user_exists(username):
     """چک می‌کنه یوزرنیمی که رو @mention کلیک شده اصلاً وجود داره یا نه - برای پیام‌های پیوی"""
     user_data = get_user(username=username)
     return jsonify({'exists': bool(user_data)})
 
 @app.route('/api/user_profile/<username>')
+@login_required
 def api_user_profile(username):
     """پروفایل کاربر برای پاپ‌آپ داخل گروه/چت - شامل کاور، قاب و آمار فالو، مثل تلگرام"""
     user_data = get_user(username=username)
@@ -2226,6 +2362,7 @@ def api_user_profile(username):
         'avatar_frame_url': f"/static/frames/{AVATAR_FRAMES[user_data['avatar_frame']]['file']}" if (is_pro and user_data['avatar_frame'] and user_data['avatar_frame'] in AVATAR_FRAMES) else '',
         'is_banned': bool(user_data['is_banned']),
         'is_admin': bool(user_data['is_admin']),
+        'posts_count': get_user_posts_count(db_conn, user_data['id']),
         'is_following': is_following(current_user.id, user_data['id']) if current_user.is_authenticated else False,
         'is_self': current_user.is_authenticated and current_user.username == user_data['username'],
     })
@@ -2264,7 +2401,7 @@ def edit_profile():
         elif username_taken_by_room(new_username):
             username_error = 'این یوزرنیم قبلاً استفاده شده است'
         else:
-            c.execute("SELECT id FROM users WHERE username = ? AND id != ?", (new_username, current_user.id))
+            c.execute("SELECT id FROM users WHERE LOWER(username) = LOWER(?) AND id != ?", (new_username, current_user.id))
             if c.fetchone():
                 username_error = 'این یوزرنیم قبلاً استفاده شده است'
             else:
@@ -2455,20 +2592,20 @@ def admin_panel():
     return render_template('admin.html', users=users, private_rooms=private_rooms, 
                            all_tags=all_tags, all_particles=all_particles, all_pros=all_pros)
 
-@app.route('/admin/ban/<int:user_id>')
+@app.route('/admin/ban/<int:user_id>', methods=['POST'])
 @login_required
 def ban_user_route(user_id):
     if not current_user.is_admin: return jsonify({'error': 'Unauthorized'}), 403
     if user_id == current_user.id: return jsonify({'error': 'نمی‌توانید خودتان را بن کنید'}), 400
     ban_user_db(user_id, current_user.id); return jsonify({'success': True})
 
-@app.route('/admin/unban/<int:user_id>')
+@app.route('/admin/unban/<int:user_id>', methods=['POST'])
 @login_required
 def unban_user_route(user_id):
     if not current_user.is_admin: return jsonify({'error': 'Unauthorized'}), 403
     unban_user_db(user_id); return jsonify({'success': True})
 
-@app.route('/admin/make_admin/<int:user_id>')
+@app.route('/admin/make_admin/<int:user_id>', methods=['POST'])
 @login_required
 def make_admin_route(user_id):
     if not current_user.is_admin: return jsonify({'error': 'Unauthorized'}), 403
@@ -2492,13 +2629,14 @@ def add_tag():
     invalidate_user_enrichment(user['id'])
     return jsonify({'success': True, 'message': f'تگ {tag_name} به {username} اضافه شد'})
 
-@app.route('/admin/remove_tag/<int:tag_id>')
+@app.route('/admin/remove_tag/<int:tag_id>', methods=['POST'])
 @login_required
 def remove_tag(tag_id):
     if not current_user.is_admin: return jsonify({'error': 'Unauthorized'}), 403
     remove_user_tag(tag_id); invalidate_user_enrichment(); return jsonify({'success': True})
 
 @app.route('/get_user_tags/<int:user_id>')
+@login_required
 def get_tags(user_id): return jsonify(get_user_tags(user_id))
 
 # ==================== پارتیکل ====================
@@ -2526,16 +2664,18 @@ def set_particle():
     invalidate_user_enrichment(user['id'])
     return jsonify({'success': True, 'message': f'پارتیکل آواتار برای {username} تنظیم شد'})
 
-@app.route('/admin/remove_particle/<int:user_id>')
+@app.route('/admin/remove_particle/<int:user_id>', methods=['POST'])
 @login_required
 def remove_particle(user_id):
     if not current_user.is_admin: return jsonify({'error': 'Unauthorized'}), 403
     remove_avatar_particle(user_id); invalidate_user_enrichment(user_id); return jsonify({'success': True})
 
 @app.route('/get_avatar_particle/<int:user_id>')
+@login_required
 def get_particle(user_id): return jsonify(get_avatar_particle(user_id) or {})
 
 @app.route('/get_avatar_particle_by_username/<username>')
+@login_required
 def get_particle_by_username(username):
     user = get_user(username=username)
     if not user: return jsonify({})
@@ -2555,75 +2695,83 @@ def set_pro():
     invalidate_user_enrichment(user['id'])
     return jsonify({'success': True, 'message': f'پرو با موفقیت به {username} داده شد'})
 
-@app.route('/admin/remove_pro/<int:user_id>')
+@app.route('/admin/remove_pro/<int:user_id>', methods=['POST'])
 @login_required
 def remove_pro(user_id):
     if not current_user.is_admin: return jsonify({'error': 'Unauthorized'}), 403
     remove_pro_account(user_id); invalidate_user_enrichment(user_id); return jsonify({'success': True})
 
 @app.route('/check_pro/<int:user_id>')
+@login_required
 def check_pro(user_id): return jsonify({'is_pro': is_pro_user(user_id)})
 
 # ==================== بلاک ====================
 
-@app.route('/block_user/<username>')
+@app.route('/block_user/<username>', methods=['GET', 'POST'])
 @login_required
 def block_user_route(username):
     user = get_user(username=username)
+    wants_json = request.method == 'POST' or request.headers.get('X-Requested-With') == 'XMLHttpRequest'
     if not user:
-        if request.headers.get('X-Requested-With') == 'XMLHttpRequest': return jsonify({'success': False, 'error': 'کاربر پیدا نشد'}), 404
+        if wants_json: return jsonify({'success': False, 'error': 'کاربر پیدا نشد'}), 404
         flash('کاربر پیدا نشد'); return redirect(url_for('index'))
     if user['id'] == current_user.id:
-        if request.headers.get('X-Requested-With') == 'XMLHttpRequest': return jsonify({'success': False, 'error': 'نمیتوانید خودتان را بلاک کنید'}), 400
+        if wants_json: return jsonify({'success': False, 'error': 'نمیتوانید خودتان را بلاک کنید'}), 400
         flash('نمیتوانید خودتان را بلاک کنید'); return redirect(url_for('profile', username=username))
 
     block_user(current_user.id, user['id'])
-    # پیام‌های زنده‌ی بلاک/آنبلاک به طرفین اطلاع داده میشه
-    # v1.6 — ایونت بلاک فقط به دو طرفِ درگیر می‌رسد (روم شخصی)، نه همه‌ی آنلاین‌ها
-    socketio.emit('user_blocked', {'blocked_by': current_user.username, 'blocked_user': username},
-                  room=[f"user_{current_user.id}", f"user_{user['id']}"])
-    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+    for _r in (f"user_{current_user.id}", f"user_{user['id']}"):
+        socketio.emit('user_blocked', {'blocked_by': current_user.username, 'blocked_user': username}, room=_r)
+    if wants_json:
         return jsonify({'success': True})
     flash(f'{username} بلاک شد')
-    return redirect(request.referrer or url_for('index'))
+    return redirect(safe_redirect_target(request.referrer, request.host, url_for('index')))
 
-@app.route('/unblock_user/<username>')
+@app.route('/unblock_user/<username>', methods=['GET', 'POST'])
 @login_required
 def unblock_user_route(username):
     user = get_user(username=username)
+    wants_json = request.method == 'POST' or request.headers.get('X-Requested-With') == 'XMLHttpRequest'
     if not user:
-        if request.headers.get('X-Requested-With') == 'XMLHttpRequest': return jsonify({'success': False, 'error': 'کاربر پیدا نشد'}), 404
+        if wants_json: return jsonify({'success': False, 'error': 'کاربر پیدا نشد'}), 404
         flash('کاربر پیدا نشد'); return redirect(url_for('index'))
 
     unblock_user(current_user.id, user['id'])
-    socketio.emit('user_unblocked', {'unblocked_by': current_user.username, 'unblocked_user': username},
-                  room=[f"user_{current_user.id}", f"user_{user['id']}"])
-    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+    for _r in (f"user_{current_user.id}", f"user_{user['id']}"):
+        socketio.emit('user_unblocked', {'unblocked_by': current_user.username, 'unblocked_user': username}, room=_r)
+    if wants_json:
         return jsonify({'success': True})
     flash(f'{username} از بلاک خارج شد')
-    return redirect(request.referrer or url_for('index'))
+    return redirect(safe_redirect_target(request.referrer, request.host, url_for('index')))
 
-@app.route('/report_user/<username>')
+@app.route('/report_user/<username>', methods=['GET', 'POST'])
 @login_required
 def report_user_route(username):
-    """گزارش تخلف — فعلا فقط ثبت میشه (مثل قبل لینکش وجود داشت ولی روت نداشت)"""
+    """ثبت واقعی گزارش تخلف کاربر"""
     user = get_user(username=username)
+    wants_json = request.method == 'POST' or request.headers.get('X-Requested-With') == 'XMLHttpRequest'
     if not user:
-        if request.headers.get('X-Requested-With') == 'XMLHttpRequest': return jsonify({'success': False, 'error': 'کاربر پیدا نشد'}), 404
+        if wants_json: return jsonify({'success': False, 'error': 'کاربر پیدا نشد'}), 404
         flash('کاربر پیدا نشد'); return redirect(url_for('index'))
+    data = request.get_json(silent=True) or request.form or {}
+    reason = (data.get('reason') or '').strip()[:300]
     try:
         conn = db_conn()
         c = conn.cursor()
-        c.execute("CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, reporter_id INTEGER, reported_id INTEGER, created_at TIMESTAMP)")
-        c.execute("INSERT INTO reports (reporter_id, reported_id, created_at) VALUES (?, ?, ?)",
-                  (current_user.id, user['id'], datetime.now()))
+        c.execute("CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, reporter_id INTEGER, reported_id INTEGER, reason TEXT DEFAULT '', created_at TIMESTAMP)")
+        try:
+            c.execute("ALTER TABLE reports ADD COLUMN reason TEXT DEFAULT ''")
+        except Exception:
+            pass
+        c.execute("INSERT INTO reports (reporter_id, reported_id, reason, created_at) VALUES (?, ?, ?, ?)",
+                  (current_user.id, user['id'], reason, datetime.now()))
         conn.commit(); conn.close()
     except Exception:
         pass
-    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+    if wants_json:
         return jsonify({'success': True})
     flash(f'گزارش شما برای {username} ثبت شد')
-    return redirect(request.referrer or url_for('index'))
+    return redirect(safe_redirect_target(request.referrer, request.host, url_for('index')))
 
 @app.route('/my_blocks')
 @login_required
@@ -2789,7 +2937,7 @@ def advance_room_reads_for_viewers(room_str, room_db_id, msg_id, sender_id):
     if not sid_set:
         return
     with _state_lock:
-        sid_uid = {sid: uid for uid, sid in online_users.items()}
+        sid_uid = {sid: uid for uid, sids in online_users.items() for sid in sids}
     reset_users = []
     for sid, uid in sid_uid.items():
         if uid == sender_id or sid not in sid_set:
@@ -2826,6 +2974,7 @@ def room_members_api(room_id):
     mode = room.get('member_visibility') or 'all'
     members_hidden = False
     members = get_room_members_full(room['id'])
+    mgr = get_room_admin_perms(room['id'], current_user.id)
     banned = []
     if not can_manage and mode != 'all':
         if mode == 'admins':
@@ -2833,10 +2982,8 @@ def room_members_api(room_id):
         else:
             members = []
             members_hidden = True
-    else:
+    if mgr['is_owner'] or (mgr['is_admin'] and 'ban_members' in mgr['perms']) or current_user.is_admin:
         banned = get_banned_members(room['id'])
-    
-    mgr = get_room_admin_perms(room['id'], current_user.id)
     my_role = 'owner' if mgr['is_owner'] else ('admin' if mgr['is_admin'] else 'member')
     # پرچم پرو + دسترسی‌های ادمینی هر عضو
     conn_m = db_conn(); c_m = conn_m.cursor()
@@ -2871,6 +3018,7 @@ def room_members_api(room_id):
             m['admin_perms'] = []
     conn_m.close()
     return jsonify({
+        'room_id': room['room_id'],
         'members': members,
         'banned': banned,
         'is_owner': is_owner,
@@ -2971,11 +3119,12 @@ def api_room_pins(room_id):
 @app.route('/room/<room_id>/set_bio', methods=['POST'])
 @login_required
 def set_room_bio_route(room_id):
-    """بیوی کانال/گروه — فقط مالک، حداکثر ۵۱۲ کاراکتر"""
+    """بیوی کانال/گروه — مالک یا ادمین دارای دسترسی change_info، حداکثر ۵۱۲ کاراکتر"""
     room = get_room_by_id(room_id)
     if not room: return jsonify({'error': 'روم پیدا نشد'}), 404
-    if not is_room_owner(room['id'], current_user.id):
-        return jsonify({'error': 'فقط مالک می‌تواند بیو را تغییر دهد'}), 403
+    mgr = get_room_admin_perms(room['id'], current_user.id)
+    if not (mgr['is_owner'] or (mgr['is_admin'] and 'change_info' in mgr['perms'])):
+        return jsonify({'error': 'دسترسی تغییر اطلاعات گروه ندارید'}), 403
     data = request.get_json(silent=True) or {}
     bio = (data.get('bio') or request.form.get('bio') or '').strip()
     if len(bio) > 512:
@@ -3033,16 +3182,17 @@ def toggle_room_mute(room_id):
 def set_room_avatar(room_id):
     room = get_room_by_id(room_id)
     if not room: return jsonify({'error': 'روم پیدا نشد'}), 404
-    if not is_room_owner(room['id'], current_user.id):
-        return jsonify({'error': 'فقط مالک گروه می‌تواند عکس را تغییر دهد'}), 403
+    mgr = get_room_admin_perms(room['id'], current_user.id)
+    if not (mgr['is_owner'] or (mgr['is_admin'] and 'change_info' in mgr['perms'])):
+        return jsonify({'error': 'دسترسی تغییر عکس گروه ندارید'}), 403
 
     if 'avatar' not in request.files:
         return jsonify({'error': 'فایلی انتخاب نشده'}), 400
     file = request.files['avatar']
-    if file.filename == '' or '.' not in file.filename or file.filename.rsplit('.', 1)[1].lower() not in (PROFILE_COVER_ALLOWED_EXTENSIONS | {'gif'}):
+    ext = sanitize_upload_ext(file.filename or '')
+    if not file.filename or ext not in (PROFILE_COVER_ALLOWED_EXTENSIONS | {'gif'}):
         return jsonify({'error': 'فرمت فایل مجاز نیست'}), 400
 
-    ext = file.filename.rsplit('.', 1)[1].lower()
     filename = secure_filename(f"room_{room['id']}_{secrets.token_hex(4)}.{ext}")
     file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
     set_room_avatar_db(room['id'], filename)
@@ -3071,6 +3221,8 @@ def promote_member(room_id):
         user_id = int(data.get('user_id', 0) or 0)
     except Exception:
         user_id = 0
+    if not user_id or user_id == current_user.id:
+        return jsonify({'error': 'کاربر نامعتبر است'}), 400
     title = (data.get('title') or '').strip()[:24]
     perms_raw = data.get('permissions', '')
     try:
@@ -3080,6 +3232,11 @@ def promote_member(room_id):
         perms = ['delete_messages', 'ban_members']
     if isinstance(perms, str): perms = [perms]
     perms = [p for p in perms if p in ADMIN_PERMS]
+    # ادمین غیراول نمی‌تواند دسترسی‌ای بدهد که خودش ندارد (جلوگیری از ارتقای سطح دسترسی)
+    if not mgr['is_owner']:
+        if is_room_admin(room['id'], user_id):
+            return jsonify({'error': 'فقط مالک می‌تواند ادمین موجود را تغییر دهد'}), 403
+        perms = [p for p in perms if p in mgr['perms']]
 
     if is_room_owner(room['id'], user_id):
         return jsonify({'error': 'مالک از قبل بالاترین سطح است'}), 400
@@ -3096,10 +3253,14 @@ def demote_member(room_id):
     room = get_room_by_id(room_id)
     if not room: return jsonify({'error': 'روم پیدا نشد'}), 404
     mgr = get_room_admin_perms(room['id'], current_user.id)
-    if not (mgr['is_owner'] or (mgr['is_admin'] and 'promote' in mgr['perms'])):
-        return jsonify({'error': 'دسترسی غیرمجاز'}), 403
-    user_id = request.form.get('user_id', type=int)
-    if is_room_owner(room['id'], user_id):
+    if not mgr['is_owner']:
+        return jsonify({'error': 'فقط مالک می‌تواند ادمین را عزل کند'}), 403
+    data = request.get_json(silent=True) or request.form
+    try:
+        user_id = int(data.get('user_id', 0) or 0)
+    except Exception:
+        user_id = 0
+    if not user_id or is_room_owner(room['id'], user_id):
         return jsonify({'error': 'مالک قابل حذف نیست'}), 400
     demote_admin(room['id'], user_id)
     socketio.emit('room_admins_updated', {'room_id': room_id, 'room': f"private_{room['room_id']}"}, room=f"private_{room['room_id']}")
@@ -3108,12 +3269,12 @@ def demote_member(room_id):
 @app.route('/room/<room_id>/edit_admin', methods=['POST'])
 @login_required
 def edit_admin_route(room_id):
-    """ویرایش تگ و پرمیشن‌های ادمین — بعداً هم قابل تغییره"""
+    """ویرایش تگ و پرمیشن‌های ادمین — فقط مالک می‌تواند ادمین‌ها را ویرایش کند"""
     room = get_room_by_id(room_id)
     if not room: return jsonify({'error': 'روم پیدا نشد'}), 404
     mgr = get_room_admin_perms(room['id'], current_user.id)
-    if not (mgr['is_owner'] or (mgr['is_admin'] and 'promote' in mgr['perms'])):
-        return jsonify({'error': 'دسترسی غیرمجاز'}), 403
+    if not mgr['is_owner']:
+        return jsonify({'error': 'فقط مالک می‌تواند دسترسی ادمین را ویرایش کند'}), 403
     data = request.get_json(silent=True) or request.form
     user_id = int(data.get('user_id', 0) or 0)
     title = (data.get('title') or '').strip()[:24]
@@ -3141,9 +3302,14 @@ def ban_member(room_id):
     if not (mgr['is_owner'] or (mgr['is_admin'] and 'ban_members' in mgr['perms'])):
         return jsonify({'error': 'دسترسی غیرمجاز'}), 403
     
+    data = request.get_json(silent=True) or {}
     user_id = request.form.get('user_id', type=int)
-    reason = (request.form.get('reason', '') or '')[:200]
-    # v1.6 — اعتبارسنجی: user_id اجباری، خودتان و مالک قابل بن نیستند
+    if user_id is None and data.get('user_id') is not None:
+        try:
+            user_id = int(data.get('user_id'))
+        except (TypeError, ValueError):
+            user_id = None
+    reason = ((request.form.get('reason') if request.form else data.get('reason')) or '')[:200]
     if not user_id:
         return jsonify({'error': 'کاربر نامعتبر است'}), 400
     if user_id == current_user.id:
@@ -3151,40 +3317,37 @@ def ban_member(room_id):
     if is_room_owner(room['id'], user_id) or user_id == room.get('owner_id'):
         return jsonify({'error': 'مالک گروه قابل بن نیست'}), 400
     
-    # ادمین معمولی نمی‌تونه ادمین دیگه رو بن کنه
     target_is_admin = is_room_admin(room['id'], user_id)
     if mgr['is_admin'] and not mgr['is_owner'] and target_is_admin:
         return jsonify({'error': 'فقط مالک می‌تواند ادمین را حذف کند'}), 403
     
     ban_from_room(room['id'], user_id, current_user.id, reason)
     
-    # پیام شیشه‌ای «X توسط Y بن شد» — ریل‌تایم برای همه‌ی اعضا + تاریخچه
     target_user = get_user(user_id=user_id)
     if target_user:
         announce_room_ban(room, target_user['username'], (current_user.name or '').strip() or current_user.username)
     
-    # کاربر بن شده رو با socket بیرون کن — با اسم گروه و اخراج‌کننده برای مودال تمیز
     kicker_name = (current_user.name or '').strip() or current_user.username
+    socketio.emit('kicked_from_room', {
+        'message': 'شما از گروه اخراج شدید',
+        'room_id': room_id,
+        'room_name': room['name'],
+        'by': kicker_name
+    }, room=f"user_{user_id}")
+    room_name = f"private_{room_id}"
     with _state_lock:
-        _online_snapshot = list(online_users.items())   # v1.6: iterate روی کپی، نه دیکشنری زنده
-    for uid, sid in _online_snapshot:
-        if uid == user_id:
-            socketio.emit('kicked_from_room', {
-                'message': 'شما از گروه اخراج شدید',
-                'room_id': room_id,
-                'room_name': room['name'],
-                'by': kicker_name
-            }, room=sid)
-            # از room هم خارجش کن
-            room_name = f"private_{room_id}"
+        target_sids = list(online_users.get(user_id) or ())
+    for sid in target_sids:
+        try:
+            socketio.server.leave_room(sid, room_name, namespace='/')
+        except Exception:
+            pass
+        if sid in user_rooms_map and user_rooms_map[sid] == room_name:
+            user_rooms_map[sid] = 'general'
             try:
-                socketio.server.leave_room(room_name, sid, namespace='/')
+                socketio.server.enter_room(sid, 'general', namespace='/')
             except Exception:
                 pass
-            if sid in user_rooms_map:
-                user_rooms_map[sid] = 'general'
-                join_room('general', sid=sid)
-            break
     
     return jsonify({'success': True})
 
@@ -3382,7 +3545,25 @@ def forward_message_route(msg_id):
             'display_name': (current_user.name or '').strip(),
             'media_meta': norm_media_meta_out(src_media_meta, file_url or '', file_type or '')
         }, room=room_str)
-        socketio.emit('group_unread', {'room_id': room['room_id'], 'from': current_user.username}, room='general')
+        try:
+            _cmf = db_conn(); _curmf = _cmf.cursor()
+            _curmf.execute("SELECT user_id FROM room_members WHERE room_id = ?", (room['id'],))
+            for (_mid,) in _curmf.fetchall():
+                if _mid != current_user.id:
+                    socketio.emit('room_chats_updated', {
+                        'room_id': room['room_id'],
+                        'room_name': room.get('name') or '',
+                        'room_avatar': room.get('avatar') or '',
+                        'room_type': room.get('room_type') or 'group',
+                        'last_message': (content or media_preview_label(file_type or 'text', file_url or '', src_media_meta) or 'پیام')[:100],
+                        'last_time': datetime.now().strftime('%H:%M'),
+                        'last_file_type': file_type or 'text',
+                        'sender_username': current_user.username,
+                        'unread': 1,
+                    }, room=f"user_{_mid}")
+            _cmf.close()
+        except Exception:
+            pass
         return jsonify({'success': True, 'message_id': msg_id2})
 
 # ==================== فالو ====================
@@ -3422,7 +3603,7 @@ def api_follow_list(username):
     return jsonify({'users': out, 'type': kind})
 
 
-@app.route('/follow/<username>')
+@app.route('/follow/<username>', methods=['GET', 'POST'])
 @login_required
 def follow_route(username):
     user = get_user(username=username)
@@ -3435,9 +3616,9 @@ def follow_route(username):
     
     follow_user(current_user.id, user['id'])
     flash(f'{username} را فالو کردید')
-    return redirect(request.referrer or url_for('profile', username=username))
+    return redirect(safe_redirect_target(request.referrer, request.host, url_for('profile', username=username)))
 
-@app.route('/unfollow/<username>')
+@app.route('/unfollow/<username>', methods=['GET', 'POST'])
 @login_required
 def unfollow_route(username):
     user = get_user(username=username)
@@ -3447,7 +3628,7 @@ def unfollow_route(username):
     
     unfollow_user(current_user.id, user['id'])
     flash(f'{username} را آنفالو کردید')
-    return redirect(request.referrer or url_for('profile', username=username))
+    return redirect(safe_redirect_target(request.referrer, request.host, url_for('profile', username=username)))
 
 @app.route('/followers/<username>')
 def followers_list(username):
@@ -3841,14 +4022,17 @@ def api_saved_chat():
 
 # ==================== v1.4.0 — دانلود حرفه‌ای فایل‌ها (مثل تلگرام) ====================
 @app.route('/files/<path:filename>')
+@login_required
 def download_file(filename):
-    """استریم دانلود با پشتیبانی کامل Range (پخش/دانلود تدریجی ویدئوی حجیم)
-    + Content-Disposition با نام اصلی فایل. مسیر قدیمی /static/uploads هم سر جایش است."""
+    """استریم دانلود امن با احراز هویت، بررسی عضویت چت، جلوگیری از path traversal و پشتیبانی Range."""
     from flask import send_from_directory
-    safe = filename.replace('\\', '/')
-    if '..' in safe or safe.startswith('/'):
-        return jsonify({'error': 'invalid path'}), 400
+    safe = filename.replace('\\', '/').lstrip('/')
     up = app.config['UPLOAD_FOLDER']
+    resolved = resolve_upload_path(up, safe)
+    if not resolved:
+        return jsonify({'error': 'invalid path'}), 400
+    if not _can_access_uploaded_file(safe):
+        return jsonify({'error': 'forbidden'}), 403
     as_attachment = request.args.get('dl') == '1'
     try:
         resp = send_from_directory(up, safe, conditional=True, as_attachment=as_attachment)
@@ -3864,16 +4048,8 @@ def download_file(filename):
 
 @app.route('/api/health')
 def api_health():
-    """پایش سلامت برای دیپلوی تجاری (بدون نیاز به لاگین)"""
-    try:
-        conn = db_conn(); c = conn.cursor()
-        users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        msgs = c.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        rooms = c.execute("SELECT COUNT(*) FROM private_rooms WHERE is_active = 1").fetchone()[0]
-    except Exception:
-        users = msgs = rooms = -1
-    return jsonify({'status': 'ok', 'version': '1.5.1', 'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'users': users, 'messages': msgs, 'active_rooms': rooms})
+    """پایش سلامت حداقلی (بدون افشای آمار داخلی دیتابیس)"""
+    return jsonify({'status': 'ok', 'version': '2.0.0'})
 
 @app.route('/create_private_room', methods=['POST'])
 @login_required
@@ -3945,14 +4121,15 @@ def api_rooms():
         return jsonify([])
     conn = db_conn()
     c = conn.cursor()
+    raw_ids = [r['room_id'] for r in rooms]
     room_strs = [f"private_{r['room_id']}" for r in rooms]
-    ph = ','.join('?' for _ in room_strs)
-    # تعداد اعضا با یک کوئری
+    ph = ','.join('?' for _ in raw_ids)
+    # تعداد اعضا با یک کوئری (مقایسه دقیق روی raw_ids نه private_*)
     c.execute(f'''SELECT pr.room_id, COUNT(*) FROM room_members rm
                   JOIN private_rooms pr ON pr.id = rm.room_id
-                  WHERE pr.room_id IN ({ph}) GROUP BY pr.room_id''', room_strs)
+                  WHERE pr.room_id IN ({ph}) GROUP BY pr.room_id''', raw_ids)
     member_counts = {t[0]: t[1] for t in c.fetchall()}
-    # آخرین پیام هر روم با یک کوئری (v1.3.2: + file_url/media_meta برای برچسب موزیک)
+    # آخرین پیام هر روم با یک کوئری
     c.execute(f'''SELECT m.room, m.content, m.timestamp, m.file_type, u.username, m.file_url, m.media_meta
                   FROM messages m JOIN users u ON m.user_id = u.id
                   JOIN (SELECT room, MAX(id) AS max_id FROM messages
@@ -3965,24 +4142,21 @@ def api_rooms():
     # حداکثر شناسه‌ی پیام هر روم با یک کوئری
     c.execute(f'''SELECT room, MAX(id) FROM messages WHERE room IN ({ph}) GROUP BY room''', room_strs)
     max_map = {t[0]: (t[1] or 0) for t in c.fetchall()}
-    # انواع روم + شناسه دیتابیسی با یک کوئری (برای can_post کانال‌ها و محاسبه‌ی ناخوانده)
-    c.execute(f"SELECT room_id, room_type, id FROM private_rooms WHERE room_id IN ({ph})", room_strs)
+    # انواع روم + شناسه دیتابیسی با یک کوئری (روی raw_ids تا can_post کانال درست محاسبه شود)
+    c.execute(f"SELECT room_id, room_type, id FROM private_rooms WHERE room_id IN ({ph})", raw_ids)
     type_map = {t[0]: t for t in c.fetchall()}
-    # v1.3.0 — شمارش ناخوانده‌ی همه‌ی روم‌ها با «یک» کوئری گروهی
-    # (قبلاً به ازای هر روم یک COUNT جدا اجرا می‌شد => با ۲۰+ روم، این حلقه
-    #  گلوگاه اصلیِ باز شدن صفحه‌ی چت‌ها بود. روم‌های بدون رکورد خواندن هم با
-    #  LEFT JOIN + COALESCE پوشش داده میشن — دقیقاً مثل منطق قبلی.)
+    # شمارش ناخوانده‌ی همه‌ی روم‌ها با ترتیب دقیق پارامترها و شمول فایل‌ها
     unread_by_room = {}
     unread_where = '''AND m.is_deleted = 0
                       AND (m.file_type IS NULL OR m.file_type = '' OR m.file_type = 'text'
-                           OR m.file_type IN ('image','video','audio','gif'))'''
+                           OR m.file_type IN ('image','video','audio','gif','file'))'''
     c.execute(f'''SELECT pr2.room_id, COUNT(m.id) FROM private_rooms pr2
                   JOIN messages m ON m.room = 'private_' || pr2.room_id
                   LEFT JOIN (SELECT room_db_id, MAX(last_msg_id) AS lr FROM room_reads
                              WHERE user_id = ? GROUP BY room_db_id) rr ON rr.room_db_id = pr2.id
                   WHERE pr2.room_id IN ({ph}) AND m.id > COALESCE(rr.lr, 0) AND m.user_id != ?
                   {unread_where}
-                  GROUP BY pr2.room_id''', (current_user.id, current_user.id, *room_strs))
+                  GROUP BY pr2.room_id''', (current_user.id, *raw_ids, current_user.id))
     for t in c.fetchall():
         unread_by_room[f"private_{t[0]}"] = t[1]
     result = []
@@ -4038,9 +4212,9 @@ def api_room_messages(room_id):
     conn = db_conn()
     c = conn.cursor()
     q = '''SELECT m.id, m.content, u.username, m.timestamp, u.avatar, m.file_url, m.file_type,
-                 m.user_id,                 m.forward_from, m.forward_from_username, u.name, u.is_admin,
+                 m.user_id, m.forward_from, m.forward_from_username, u.name, u.is_admin,
                  (SELECT COUNT(*) FROM pro_accounts pa WHERE pa.user_id = u.id AND pa.is_active = 1),
-                 ra.title, ra.user_id, m.reply_to, m.media_meta
+                 ra.title, ra.user_id, m.reply_to, m.media_meta, m.is_edited
                  FROM messages m
                  JOIN users u ON m.user_id = u.id
                  LEFT JOIN room_admins ra ON ra.room_id = ? AND ra.user_id = u.id
@@ -4093,12 +4267,14 @@ def api_room_messages(room_id):
              'is_pro': bool(r[12]),
              'admin_title': (r[13] or ''),
              'is_me': r[2] == current_user.username,
+             'is_edited': bool(r[17]) if len(r) > 17 else False,
              'author_is_owner': bool(r[7] is not None and r[7] == room['owner_id']),
              'reactions': reactions_map.get(r[0], []),
              'seen_count': (reads_map.get(r[0], 0) if is_channel else None),
              'media_meta': norm_media_meta_out(r[16], r[5] or '', r[6] or '')}
-        if r[14]:
-            snap = get_reply_snapshot(r[14])
+        # FIX: r[15] is m.reply_to (r[14] was ra.user_id!)
+        if r[15]:
+            snap = get_reply_snapshot(r[15])
             if snap: d.update(snap)
         messages.append(d)
     # همین که کاربر تاریخچه‌ی کانال رو می‌گیره یعنی پیام‌ها رو دیده — برای شمارنده‌ی ویو ثبتشون کن
@@ -4211,11 +4387,12 @@ def leave_room_route(room_id):
 @app.route('/room/<room_id>/rename', methods=['POST'])
 @login_required
 def rename_room(room_id):
-    """تغییر نام گروه — فقط مالک"""
+    """تغییر نام گروه — مالک یا ادمین دارای دسترسی change_info"""
     room = get_room_by_id(room_id)
     if not room: return jsonify({'error': 'روم پیدا نشد'}), 404
-    if not is_room_owner(room['id'], current_user.id):
-        return jsonify({'error': 'فقط مالک می‌تواند نام گروه را تغییر دهد'}), 403
+    mgr = get_room_admin_perms(room['id'], current_user.id)
+    if not (mgr['is_owner'] or (mgr['is_admin'] and 'change_info' in mgr['perms'])):
+        return jsonify({'error': 'دسترسی تغییر نام گروه ندارید'}), 403
     data = request.get_json(silent=True) or {}
     name = (data.get('name') or request.form.get('name') or '').strip()[:60]
     if not name: return jsonify({'error': 'نام نامعتبر است'}), 400
@@ -4226,28 +4403,33 @@ def rename_room(room_id):
     return jsonify({'success': True, 'name': name})
 # ==================== حذف پیام ====================
 
-@app.route('/delete_message/<msg_id>', methods=['POST', 'GET'])
+@app.route('/delete_message/<msg_id>', methods=['POST'])
 @login_required
 def delete_message_route(msg_id):
-    """حذف پیام توسط فرستنده یا ادمین"""
-    
+    """حذف پیام توسط فرستنده، ادمین کل یا ادمین روم با مجوز delete_messages"""
     try:
         db_msg_id = int(msg_id)
         success, result = delete_message_db(db_msg_id, current_user.id, current_user.is_admin)
-        
+        if not success:
+            msg = get_message_by_id(db_msg_id)
+            if msg and not msg['is_deleted'] and msg.get('room') and str(msg['room']).startswith('private_'):
+                r_obj = get_room_by_id(str(msg['room'])[len('private_'):])
+                if r_obj:
+                    mgr = get_room_admin_perms(r_obj['id'], current_user.id)
+                    if (mgr['is_owner'] or (mgr['is_admin'] and 'delete_messages' in mgr['perms'])):
+                        success, result = delete_message_db(db_msg_id, current_user.id, False, force=True)
         if success:
             room = result
             socketio.emit('message_deleted', {
-                'msg_id': msg_id,
+                'msg_id': db_msg_id,
+                'message_id': db_msg_id,
                 'username': current_user.username,
                 'room': room
             }, room=room)
             return jsonify({'success': True, 'message': 'پیام با موفقیت حذف شد'})
         else:
             return jsonify({'success': False, 'error': result}), 403
-            
     except ValueError:
-        # msg_id عددی نیست (شناسه موقت کلاینت) - چیزی توی دیتابیس پاک نشده
         return jsonify({'success': False, 'error': 'شناسه پیام نامعتبر است، لطفاً کمی صبر کن و دوباره تلاش کن'}), 400
 
 @app.route('/edit_message/<msg_id>', methods=['POST'])
@@ -4256,13 +4438,12 @@ def edit_message(msg_id):
     data = request.get_json(silent=True) or {}
     new_text = (data.get('new_text') or '').strip()[:4000]
     if not new_text:
-        return jsonify({'success': False, 'error': 'متن خالی است'})
+        return jsonify({'success': False, 'error': 'متن خالی است'}), 400
 
     try:
         db_msg_id = int(msg_id)
     except ValueError:
-        # پیام‌هایی که فقط توی مرورگر ساخته شدن (id عددی از دیتابیس ندارن)
-        return jsonify({'success': False, 'error': 'این پیام قابل ویرایش نیست'})
+        return jsonify({'success': False, 'error': 'این پیام قابل ویرایش نیست'}), 400
 
     conn = db_conn()
     c = conn.cursor()
@@ -4271,37 +4452,34 @@ def edit_message(msg_id):
 
     if not row:
         conn.close()
-        return jsonify({'success': False, 'error': 'پیام پیدا نشد'})
+        return jsonify({'success': False, 'error': 'پیام پیدا نشد'}), 404
 
     msg_user_id, room, is_deleted = row
     if is_deleted:
         conn.close()
-        return jsonify({'success': False, 'error': 'پیام حذف شده است'})
+        return jsonify({'success': False, 'error': 'پیام حذف شده است'}), 404
+    # فقط خود نویسنده پیام می‌تواند آن را ویرایش کند (در کانال، مالک کانال نیز مجاز است)
     if msg_user_id != current_user.id:
-        # v1.0.9 — ادمین‌ها/مالک گروه و کانال هم می‌توانند پیام‌های داخل همان
-        # روم را ویرایش کنند (مثل تلگرام که ادمین کانال پست‌ها را ادیت می‌کند)
-        allowed_admin = False
+        allowed_channel_owner = False
         try:
             if room and str(room).startswith('private_'):
                 r_obj = get_room_by_id(str(room)[len('private_'):])
-                if r_obj:
-                    mgr = get_room_admin_perms(r_obj['id'], current_user.id)
-                    allowed_admin = bool(mgr['is_owner'] or mgr['is_admin'])
+                if r_obj and r_obj.get('room_type') == 'channel' and is_room_owner(r_obj['id'], current_user.id):
+                    allowed_channel_owner = True
         except Exception:
-            allowed_admin = False
-        if not allowed_admin:
+            allowed_channel_owner = False
+        if not allowed_channel_owner:
             conn.close()
-            return jsonify({'success': False, 'error': 'دسترسی ندارید'})
+            return jsonify({'success': False, 'error': 'دسترسی ندارید'}), 403
 
     c.execute("UPDATE messages SET content = ?, is_edited = 1 WHERE id = ?", (new_text, db_msg_id))
     conn.commit()
-    # کش اسنپ‌شات ریپلای این پیام هم خنثی بشه که پیش‌نمایش ریپلای‌های دیگران تازه بشه
     try: _reply_cache.pop(db_msg_id, None)
     except Exception: pass
 
     room = room or 'general'
     socketio.emit('message_edited', {
-        'msg_id': msg_id,
+        'msg_id': db_msg_id,
         'message_id': db_msg_id,
         'new_text': new_text
     }, room=room)
@@ -4337,26 +4515,29 @@ def _human_size(n):
             return f'{n*1024:.0f} {unit}' if unit == 'KB' else f'{n:.1f} {unit}'
     return f'{n:.1f} TB'
 
-def _save_upload_stream(file, dst_path):
-    """نوشتن استریمی فایل روی دیسک — برخلاف file.save() کل فایل توی RAM لود نمیشه
-    (روی گوشی‌های ضعیف و آپلودهای همزمان، همین یعنی فرق بین سرعت و کرش)."""
+def _save_upload_stream(file, dst_path, max_bytes):
+    """نوشتن استریمی فایل با قطع فوری در صورت عبور از سقف حجم مجاز (جلوگیری از پرشدن دیسک/رم)."""
     written = 0
     with open(dst_path, 'wb') as out:
         while True:
             chunk = file.stream.read(256 * 1024)
             if not chunk:
                 break
-            out.write(chunk)
             written += len(chunk)
+            if written > max_bytes:
+                return -1
+            out.write(chunk)
     return written
 
 def _persist_upload(file):
     """اعتبارسنجی + ذخیره‌ی امن فایل چت. خروجی: (payload_dict, status_code)"""
     if file is None or not getattr(file, 'filename', ''):
         return {'success': False, 'error': 'فایلی انتخاب نشده'}, 400
-    raw_name = file.filename or ''
-    ext = raw_name.rsplit('.', 1)[-1].lower() if '.' in raw_name else ''
+    raw_name = (file.filename or '').strip()
+    ext = sanitize_upload_ext(raw_name)
     mime = (file.mimetype or '').split(';')[0].strip().lower()
+    if ext in BANNED_UPLOAD_EXTS:
+        return {'success': False, 'error': 'فرمت فایل مجاز نیست'}, 400
     kind = _MIME_TO_KIND.get(mime) or \
         ('image' if ext in _KIND_EXTS['image'] else
          'gif' if ext in _KIND_EXTS['gif'] else
@@ -4364,34 +4545,30 @@ def _persist_upload(file):
          'audio' if ext in _KIND_EXTS['audio'] else 'file')
     if kind != 'file' and ext and ext not in _KIND_EXTS.get(kind, set()) and ext not in ALLOWED_EXTENSIONS:
         return {'success': False, 'error': 'فرمت فایل مجاز نیست'}, 400
-    # v1.5.0 — «هر فرمتی» برای فایل‌های عمومی: هر پسوندی جز سه فرمتِ که داخل
-    # مرورگر اجرا می‌شوند (html/svg که XSS می‌دهند) پذیرفته می‌شود.
-    _BANNED_FILE_EXTS = {'html', 'htm', 'svg', 'svgz', 'xhtml', 'shtml', 'xht', 'xml', 'xsl', 'xslt', 'mht', 'mhtml', 'js', 'mjs', 'swf'}
-    if kind == 'file' and ext and ext in _BANNED_FILE_EXTS:
-        return {'success': False, 'error': 'فرمت فایل مجاز نیست'}, 400
     cap = _UPLOAD_SIZE_CAPS.get(kind, 50 * 1024 * 1024)
-    # Content-Length زودتر از ذخیره‌سازی چک میشه تا آپلودهای بزرگ قبل از شروع رد بشن
     try:
         cl = int(request.headers.get('Content-Length', 0) or 0)
         if cl > cap + 64 * 1024:
             return {'success': False, 'error': f'حجم فایل بیش از حد مجاز است (حداکثر {_human_size(cap)})'}, 413
     except Exception:
         pass
-    filename = secure_filename(raw_name) or ''
-    safe_ext = ext if ext and ext in ALLOWED_EXTENSIONS else (ext or 'bin')
-    final_name = f"{current_user.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(4)}.{safe_ext}"
-    dst = os.path.join(app.config['UPLOAD_FOLDER'], final_name)
-    written = _save_upload_stream(file, dst)
-    if written <= 0:
-        try: os.remove(dst)
-        except Exception: pass
-        return {'success': False, 'error': 'فایل خالی است'}, 400
-    if written > cap:
+    safe_ext = ext if ext and ext not in BANNED_UPLOAD_EXTS else 'bin'
+    final_name = secure_filename(f"{current_user.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(4)}.{safe_ext}")
+    if not final_name:
+        final_name = f"{current_user.id}_{secrets.token_hex(8)}.bin"
+    dst = resolve_upload_path(app.config['UPLOAD_FOLDER'], final_name)
+    if not dst:
+        return {'success': False, 'error': 'نام فایل نامعتبر است'}, 400
+    written = _save_upload_stream(file, dst, cap)
+    if written < 0:
         try: os.remove(dst)
         except Exception: pass
         return {'success': False, 'error': f'حجم فایل بیش از حد مجاز است (حداکثر {_human_size(cap)})'}, 413
+    if written == 0:
+        try: os.remove(dst)
+        except Exception: pass
+        return {'success': False, 'error': 'فایل خالی است'}, 400
     url = f'/static/uploads/{final_name}'
-    # هر دو کلید حفظ شدن: وبِ قدیمی «url» می‌خونه، اپ «file_url»
     return {'success': True, 'url': url, 'file_url': url, 'filename': final_name,
             'size': written, 'kind': kind}, 200
 
@@ -5173,13 +5350,6 @@ def ai_chat_api():
                 "🎵 **Uptown Funk** - Bruno Mars",
                 "🎵 **Shake It Off** - Taylor Swift"
             ]        
-        elif 'ویژه' in msg_lower or 'دکتر استاپ' in msg_lower:
-            songs = [
-                "🎵 **zanbor** - RezaSadeghi (شاهکار)",
-                "🎵 **Jaghbezanin** - DR-Stop",
-                "🎵 **Quantum2** - DR-Stop (زیر مجموعه شاهکار کوانتوم)",
-                "🎵 **This is Quantum 3** - parvareshsam (یکی از خفن ترین اهنگ های سلطان دکتر استاپ)"
-            ]    
         elif 'انرژی' in msg_lower or 'ورزش' in msg_lower:
             songs = [
                 "🎵 **Eye of The Tiger** - Survivor (کلاسیک بوکس!)",
@@ -5244,8 +5414,12 @@ def ai_chat_api():
             
             elif 'توان' in msg_lower:
                 if len(numbers) >= 2:
-                    result = numbers[0] ** numbers[1]
-                    reply = f"📐 توان: {numbers[0]} به توان {numbers[1]} = **{result}**"
+                    base, exp = numbers[0], numbers[1]
+                    if abs(base) > 10000 or exp < 0 or exp > 30:
+                        reply = "⚠️ اعداد خیلی بزرگ هستند! (پایه حداکثر ۱۰٬۰۰۰ و توان بین ۰ تا ۳۰)"
+                    else:
+                        result = base ** exp
+                        reply = f"📐 توان: {base} به توان {exp} = **{result}**"
                 else: reply = "دو تا عدد بگو! مثلاً: `توان ۲ به ۸`"
             
             else:
@@ -5278,7 +5452,7 @@ def ai_chat_api():
                 f"{medals[i]} **{r[0]}**: 💬{r[1]} پیام | 👥{r[2]} فالوئر | ⭐{r[4]} امتیاز"
                 for i, r in enumerate(ranking)
             ])
-            reply = f"🏆 **رنکینگ کاربران Xypher:**\n{rank_list}\n\n📊 فرمول: هر پیام ۲ امتیاز + هر فالوئر ۵ امتیاز + ادمین ۱۰۰ امتیاز"
+            reply = f"🏆 **رنکینگ کاربران RAVI:**\n{rank_list}\n\n📊 فرمول: هر پیام ۲ امتیاز + هر فالوئر ۵ امتیاز + ادمین ۱۰۰ امتیاز"
         else:
             reply = "هنوز آماری نیست! 😅"
 
@@ -5334,20 +5508,30 @@ def ai_chat():
 # v1.6 امنیتی — کلید OpenRouter دیگر هاردکد نیست و از متغیر محیطی خوانده می‌شود
 OPENROUTER_KEY = os.environ.get('OPENROUTER_API_KEY', '').strip()
 
+_ai_pro_rate = defaultdict(deque)
+
 @app.route('/api/ai_pro_chat', methods=['POST'])
 @login_required
 def ai_pro_chat_api():
-    # موقتاً PRO رو چک نکن
-    # if not is_pro_user(current_user.id) and not current_user.is_admin:
-    #     return jsonify({'reply': '⛔ فقط کاربران PRO!'})
-    
+    if not is_pro_user(current_user.id) and not current_user.is_admin:
+        return jsonify({'reply': '⛔ این قابلیت مخصوص کاربران RAVI PRO است!'}), 403
+
     if not OPENROUTER_KEY:
-        return jsonify({'reply': '❌ AI PRO غیرفعال است — کلید OPENROUTER_API_KEY روی سرور تنظیم نشده'})
+        return jsonify({'reply': '❌ AI PRO غیرفعال است — کلید OPENROUTER_API_KEY روی سرور تنظیم نشده'}), 503
+
+    now_t = _time.time()
+    with _rate_lock:
+        dq = _ai_pro_rate[current_user.id]
+        while dq and now_t - dq[0] > 60:
+            dq.popleft()
+        if len(dq) >= 10:
+            return jsonify({'reply': '⏳ سقف ۱۰ پیام در دقیقه پر شد؛ کمی صبر کنید.'}), 429
+        dq.append(now_t)
 
     data = request.get_json(silent=True) or {}
-    message = (data.get('message') or '').strip()
+    message = (data.get('message') or '').strip()[:1500]
     if not message:
-        return jsonify({'reply': 'پیام خالی!'})
+        return jsonify({'reply': 'پیام خالی!'}), 400
     
     try:
         res = requests.post(
@@ -5593,27 +5777,27 @@ def _emit_pv_chats_updated(chat_id, sender_id, receiver_id, last_message, last_t
             pass
 
 @socketio.on('connect')
-def handle_connect():
-    if current_user.is_authenticated:
-        with _state_lock:
-            online_users[current_user.id] = request.sid
-        user_rooms_map[request.sid] = 'general'
-        join_room('general')
-        # v1.4.0 — روم اختصاصی هر کاربر: ایونت‌های شخصی (پیش‌نمایش پیوی/ناخوانده/...)
-        # فقط به همین روم ارسال می‌شوند؛ دیگر هیچ محتوای خصوصی‌ای به room='general'
-        #Broadcast نمی‌شود (باگ امنیتی نشت پیام‌های پیوی به همه‌ی کاربران - فیکس شد)
-        join_room(f"user_{current_user.id}")
-        # اتصال جدید => تایمر آفلاین در انتظار لغو شود (آنلاین طبیعی، بدون پرش)
-        t = _pending_offline.pop(current_user.id, None)
-        if t:
-            try: t.cancel()
-            except Exception: pass
-        _register_session()
+def handle_connect(auth=None):
+    if not current_user.is_authenticated or current_user.is_banned:
+        return False
+    with _state_lock:
+        sids = online_users.setdefault(current_user.id, set())
+        was_offline = len(sids) == 0
+        sids.add(request.sid)
+    user_rooms_map[request.sid] = 'general'
+    join_room('general')
+    join_room(f"user_{current_user.id}")
+    t = _pending_offline.pop(current_user.id, None)
+    if t:
+        try: t.cancel()
+        except Exception: pass
+    _register_session()
+    if was_offline:
         emit('user_online', {'username': current_user.username, 'avatar': current_user.avatar}, broadcast=True)
-        _broadcast_online_list()
+    _broadcast_online_list()
 
 @socketio.on('disconnect')
-def handle_disconnect():
+def handle_disconnect(reason=None):
     if not current_user.is_authenticated:
         return
     uid = current_user.id
@@ -5621,21 +5805,22 @@ def handle_disconnect():
     user_rooms_map.pop(sid, None)
     typing_clean = False
     with _state_lock:
-        # فقط اگه این ساکشن، ساکشن اصلی کاربره (لاگین دوم جایگزینش نشده)
-        if online_users.get(uid) == sid:
-            del online_users[uid]
-            typing_clean = True
+        sids = online_users.get(uid)
+        if sids is not None:
+            sids.discard(sid)
+            if not sids:
+                del online_users[uid]
+                typing_clean = True
     if typing_clean:
         for room, users in list(typing_by_room.items()):
             users.pop(uid, None)
     _remove_session(sid)
     _session_last_touch.pop(sid, None)
-    # آنلاین طبیعی: ۴ ثانیه فرصت ری‌کانکت — قطعی لحظه‌ی نت باعث پرش آنلاین/آفلاین نمیشه
     _uname = current_user.username
     def _go_offline(u=uid):
         with _state_lock:
-            still = online_users.get(u)
-        if still is None:
+            still = bool(online_users.get(u))
+        if not still:
             try:
                 conn = db_conn(); c = conn.cursor()
                 c.execute("UPDATE users SET last_seen = ? WHERE id = ?", (datetime.now(), u))
@@ -5651,7 +5836,7 @@ def handle_disconnect():
         if old:
             try: old.cancel()
             except Exception: pass
-        if online_users.get(uid) is None:
+        if not online_users.get(uid):
             _pending_offline[uid] = t
             t.start()
 
@@ -5672,23 +5857,49 @@ def handle_leave_pv(data):
 @socketio.on('send_message')
 def handle_send_message(data):
     if not current_user.is_authenticated or current_user.is_banned: return
+    if not isinstance(data, dict): return
     _touch_session()
 
     message = str(data.get('message') or '')[:4000]  # v1.6 — سقف طول پیام سمت سرور
-    room = data.get('room', 'general')
-    file_url = data.get('file_url', None)
-    file_type = data.get('file_type', 'text')
+    raw_room = str(data.get('room') or 'general').strip()
+    raw_file_url = data.get('file_url', None)
+    # اعتبارسنجی امنیتی: رد آدرس‌های خارجی (سرقت کوکی) و path traversal
+    if raw_file_url is not None and str(raw_file_url).strip() != '':
+        file_url = sanitize_client_file_url(raw_file_url)
+        if file_url is None:
+            emit('error', {'code': 'invalid_file_url', 'message': 'آدرس فایل نامعتبر است'}, room=request.sid)
+            return
+    else:
+        file_url = None
+    # جلوگیری از جعل file_type سیستمی (مثل sys_join_link) توسط کلاینت
+    file_type = sanitize_client_file_type(data.get('file_type', 'text'), bool(file_url))
     private_chat_id = data.get('private_chat_id', None)
+    if private_chat_id is not None:
+        try:
+            private_chat_id = int(private_chat_id)
+            if private_chat_id <= 0:
+                private_chat_id = None
+        except (TypeError, ValueError):
+            emit('error', {'code': 'invalid_chat', 'message': 'شناسه چت نامعتبر است'}, room=request.sid)
+            return
     client_msg_id = data.get('client_msg_id', None)
     reply_to = data.get('reply_to', None)
 
-    # پیام‌های پیوی همیشه باید توی روم اختصاصی pv_<chat_id> ذخیره بشن، نه یه رشته‌ی
-    # عمومی مثل 'pv' که هیچکس واقعا join نشده - وگرنه حذف/ویرایش پیام بعدا به هیچ‌کس نمی‌رسه
     if private_chat_id:
         room = f"pv_{private_chat_id}"
+    else:
+        # جلوگیری از room injection (مثلاً فرستادن room='pv_5' یا 'user_1' بدون private_chat_id)
+        if raw_room != 'general' and not raw_room.startswith('private_'):
+            emit('error', {'code': 'invalid_room', 'message': 'اتاق مقصد نامعتبر است'}, room=request.sid)
+            return
+        room = raw_room
 
-    forward_from = (data.get('forward_from') or '').strip()
-    forward_from_username = (data.get('forward_from_username') or '').strip()
+    if not message.strip() and not file_url:
+        return
+
+    # کلاینت عادی حق جعل forward_from در send_message را ندارد (فوروارد واقعی از /forward_message انجام می‌شود)
+    forward_from = ''
+    forward_from_username = ''
 
     # ---------- ریت‌لیمیت سراسری سبک (محافظت در برابر اسپم/فلوود، مستقل از اسلومود روم) ----------
     now_t = _time.time()
@@ -5789,8 +6000,30 @@ def handle_send_message(data):
 
     # v1.2.1 — client-supplied media metadata (image dims / music tags)
 
-    # اسنپ‌شات ریپلای (بر اساس شناسه — دقیق مثل تلگرام، بدون قاطی شدن متن‌های تکراری)
-    reply_snap = get_reply_snapshot(reply_to) if reply_to else None
+    # اعتبارسنجی cross-chat برای reply_to: پیام ریپلای‌شده باید دقیقاً متعلق به همین چت/روم باشد
+    reply_snap = None
+    if reply_to:
+        try:
+            reply_to_int = int(reply_to)
+        except (TypeError, ValueError):
+            reply_to_int = None
+        if reply_to_int:
+            ref_msg = get_message_by_id(reply_to_int)
+            same_scope = False
+            if ref_msg and not ref_msg['is_deleted']:
+                if private_chat_id:
+                    same_scope = (ref_msg.get('private_chat_id') == private_chat_id)
+                else:
+                    same_scope = (ref_msg.get('private_chat_id') is None and (ref_msg.get('room') or 'general') == room)
+            if same_scope:
+                reply_to = reply_to_int
+                _rs = get_reply_snapshot(reply_to_int)
+                # کپی مستقل تا کش _reply_cache درجا آلوده نشود
+                reply_snap = dict(_rs) if _rs else None
+            else:
+                reply_to = None
+        else:
+            reply_to = None
 
     # v1.6 — ددپ دوبل‌ارسال: اگر همین client_msg_id قبلاً ذخیره شده (ریترای کلاینت
     # بعد از قطعی شبکه)، همان پیام را فقط به خودِ فرستنده ack می‌کنیم تا
@@ -5827,8 +6060,7 @@ def handle_send_message(data):
             return
 
     msg_id = save_message(current_user.id, current_user.username, message, room, file_url, file_type, private_chat_id, client_msg_id, forward_from=forward_from, forward_from_username=forward_from_username, reply_to=reply_to, media_meta=media_meta_in)
-    if reply_snap:
-        reply_snap['reply_to'] = msg_id  # این پیامِ جدید به پیامِ مقصد ریپلای شده
+    # reply_snap['reply_to'] باید همان شناسه‌ی پیامِ مقصد ریپلای باقی بماند (نه msg_id جدید!)
     
     # ویوی خودِ فرستنده هم حساب میشه — توی کانال‌ها ویوی پست ادمین از ۱ شروع میشه (واقعی‌تر)
     seen_count = 0
@@ -5945,7 +6177,6 @@ def handle_send_message(data):
                         }, room=f"user_{_mid}")
             except Exception:
                 pass
-            socketio.emit('group_unread', {'room_id': room[len('private_'):], 'from': current_user.username}, room='general')
         # v1.1.1 — ROOT-FIX ناخوانده: هر عضو آنلاینی که الان داخل چت بازه،
         # همین‌جا read-stateش جلو میره => بعد از رفرش هم بج «پیام جدید» برنمی‌گرده.
         if room.startswith('private_'):
@@ -5979,7 +6210,7 @@ def handle_delete_message(data):
                 if r_obj:
                     mgr = get_room_admin_perms(r_obj['id'], current_user.id)
                     if (mgr['is_owner'] or mgr['is_admin']) and 'delete_messages' in mgr['perms'] and m[1] != current_user.id:
-                        success, result = delete_message_db(message_id, m[1], False, force=True)
+                        success, result = delete_message_db(message_id, current_user.id, False, force=True)
         except Exception:
             pass
     if success:
@@ -6023,7 +6254,8 @@ def handle_toggle_reaction(data):
                 return
 
     reactions = toggle_reaction_db(message_id, current_user.id, emoji)
-    room = f"pv_{chat_id}" if chat_id else (msg['room'] or 'general')
+    # اتاق مقصد صرفاً از رکورد دیتابیس پیام تعیین می‌شود (جلوگیری از تزریق chat_id جعلی)
+    room = f"pv_{msg['private_chat_id']}" if msg.get('private_chat_id') else (msg['room'] or 'general')
     socketio.emit('reaction_update', {
         'message_id': message_id,
         'reactions': reactions,
@@ -6245,14 +6477,11 @@ def handle_mark_all_pv_read(data):
             'reader': current_user.username
         }, room=f"pv_{chat_id}")
 
-        # بج ناخوانده‌ی لیست چت — فقط روی کلاینت‌های دو طرف خود چت (بدون نشت عمومی)
-        part = _pv_participants(chat_id)
-        if part:
-            for uid in set(part):
-                socketio.emit('pv_chats_updated', {
-                    'chat_id': chat_id,
-                    'unread_count': 0
-                }, room=f"user_{uid}")
+        # بج ناخوانده‌ی لیست چت — فقط برای خواننده صفر می‌شود (نه طرف مقابل!)
+        socketio.emit('pv_chats_updated', {
+            'chat_id': chat_id,
+            'unread_count': 0
+        }, room=f"user_{current_user.id}")
 
 @socketio.on('mark_single_read')
 def handle_mark_single_read(data):
@@ -6285,28 +6514,36 @@ def handle_group_read(data):
     conn.close()
     if mx:
         update_room_read(current_user.id, room['id'], mx)
-        socketio.emit('group_unread_reset', {'room_id': room['room_id'], 'reader': current_user.id}, room='general')
+        socketio.emit('group_unread_reset', {'room_id': room['room_id'], 'reader': current_user.id}, room=f"user_{current_user.id}")
+
+# ==================== ثبت روت‌های مجله و پست‌های پروفایل ====================
+register_magazine_routes(app, db_conn, get_user)
 
 # ==================== v1.6 — نگهداری دوره‌ای منابع ====================
 def _maintenance_once():
     now = _time.time()
-    for k in list(_login_attempts.keys()):
-        dq = _login_attempts.get(k)
-        if not dq or now - dq[-1] > 3600: _login_attempts.pop(k, None)
-    for k in list(_send_times.keys()):
-        dq = _send_times.get(k)
-        if not dq or now - dq[-1] > 60: _send_times.pop(k, None)
-    for r in list(typing_by_room.keys()):
-        if not typing_by_room.get(r): typing_by_room.pop(r, None)
-    for k, v in list(_token_cache.items()):
-        if now - v[0] > _TOKEN_TTL * 4: _token_cache.pop(k, None)
-    for k, v in list(_pv_membership_cache.items()):
-        if now - v[0] > _PV_CACHE_TTL * 4: _pv_membership_cache.pop(k, None)
-    for k, v in list(_user_enrich_cache.items()):
-        if now - v[0] > 300: _user_enrich_cache.pop(k, None)
-    for k, v in list(_reply_cache.items()):
-        if now - v[0] > 600: _reply_cache.pop(k, None)
-    if len(_session_last_touch) > 2000: _session_last_touch.clear()
+    with _rate_lock:
+        for k in list(_login_attempts.keys()):
+            dq = _login_attempts.get(k)
+            if not dq or now - dq[-1] > 3600: _login_attempts.pop(k, None)
+        for k in list(_ai_pro_rate.keys()):
+            dq = _ai_pro_rate.get(k)
+            if not dq or now - dq[-1] > 120: _ai_pro_rate.pop(k, None)
+    with _state_lock:
+        for k in list(_send_times.keys()):
+            dq = _send_times.get(k)
+            if not dq or now - dq[-1] > 60: _send_times.pop(k, None)
+        for r in list(typing_by_room.keys()):
+            if not typing_by_room.get(r): typing_by_room.pop(r, None)
+        for k, v in list(_token_cache.items()):
+            if now - v[0] > _TOKEN_TTL * 4: _token_cache.pop(k, None)
+        for k, v in list(_pv_membership_cache.items()):
+            if now - v[0] > _PV_CACHE_TTL * 4: _pv_membership_cache.pop(k, None)
+        for k, v in list(_user_enrich_cache.items()):
+            if now - v[0] > 300: _user_enrich_cache.pop(k, None)
+        for k, v in list(_reply_cache.items()):
+            if now - v[0] > 600: _reply_cache.pop(k, None)
+        if len(_session_last_touch) > 2000: _session_last_touch.clear()
     try:
         conn = db_conn(); c = conn.cursor()
         # توکن‌های بی‌استفاده‌تر از عمر کوکی (۴۵ روز + ۱ روز) و ردیف‌های سوکتِ مانده
@@ -6333,4 +6570,12 @@ _maint_thread = threading.Thread(target=_maintenance_loop, daemon=True)
 _maint_thread.start()
 
 if __name__ == '__main__':
-    socketio.run(app, debug=False, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), allow_unsafe_werkzeug=True, log_output=False)
+    _is_debug = os.environ.get('RAVI_DEBUG', '0').lower() in ('1', 'true', 'yes')
+    socketio.run(
+        app,
+        debug=_is_debug,
+        host='0.0.0.0',
+        port=int(os.environ.get('PORT', 5000)),
+        allow_unsafe_werkzeug=_is_debug,
+        log_output=_is_debug,
+    )

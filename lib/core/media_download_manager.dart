@@ -8,6 +8,8 @@ import 'package:saver_gallery/saver_gallery.dart';
 import 'api_service.dart';
 import 'app_state.dart';
 import 'constants.dart';
+import 'storage_service.dart';
+import '../ui/home/data_storage_screen.dart';
 
 /// v1.5.0 — سرویس مدیای ماندگار روی دیسک (مثل تلگرام):
 ///  • هر عکس/ویدئو/فایلی که یک بار دانلود می‌شود برای همیشه در پوشه‌ی
@@ -82,16 +84,53 @@ String fmtTransfer(int done, int total) {
 String fmtSpeed(double bps) => bps < 1 ? '' : '${fmtBytes(bps.round())}/s';
 
 class MediaDownloadManager extends ChangeNotifier {
-  MediaDownloadManager._();
+  MediaDownloadManager._() {
+    StorageService.registerClearHook(evictAll);
+  }
   static final MediaDownloadManager I = MediaDownloadManager._();
 
   static const _kMediaDir = 'ravi_media';
+  static const int _maxDiskBytes = 350 * 1024 * 1024; // 350 MB LRU cap
 
   Directory? _dir;
   bool _ready = false;
   final Map<String, MediaDownloadTask> _tasks = {};
   // in-flight downloads so parallel bubbles share ONE request
   final Map<String, Future<String?>> _inflight = {};
+
+  void evictAll() {
+    _knownOnDisk.clear();
+    notifyListeners();
+  }
+
+  Future<void> _enforceDiskCap() async {
+    try {
+      final d = _dir;
+      if (d == null || !d.existsSync()) return;
+      final entries = <({File f, int size, int mtime})>[];
+      var total = 0;
+      for (final e in d.listSync()) {
+        if (e is! File || e.path.endsWith('.part')) continue;
+        try {
+          final st = e.statSync();
+          total += st.size;
+          entries.add((f: e, size: st.size, mtime: st.modified.millisecondsSinceEpoch));
+        } catch (_) {}
+      }
+      if (total <= _maxDiskBytes) return;
+      // Evict oldest files first until below 85% of cap
+      entries.sort((a, b) => a.mtime.compareTo(b.mtime));
+      final target = (_maxDiskBytes * 0.85).round();
+      for (final item in entries) {
+        if (total <= target) break;
+        try {
+          await item.f.delete();
+          total -= item.size;
+        } catch (_) {}
+      }
+      _knownOnDisk.clear();
+    } catch (_) {}
+  }
 
   MediaDownloadTask? taskFor(String fileUrl) => _tasks[norm(fileUrl)];
 
@@ -185,6 +224,23 @@ class MediaDownloadManager extends ChangeNotifier {
         t.state = 'done';
         t.progress = 1;
         if (t.total <= 0) t.total = t.received;
+        unawaited(_enforceDiskCap());
+        // Respect user's "Save to phone gallery" preference for photos/videos
+        if (MediaPrefs.saveToGallery.value) {
+          final ext = key.contains('.') ? key.split('.').last.toLowerCase() : '';
+          if (ext == 'jpg' || ext == 'jpeg' || ext == 'png' || ext == 'webp' || ext == 'mp4' || ext == 'mov') {
+            unawaited(() async {
+              try {
+                await SaverGallery.saveFile(
+                  filePath: path,
+                  fileName: 'RAVI_${DateTime.now().millisecondsSinceEpoch}.$ext',
+                  albumPath: 'RAVI',
+                  skipIfExists: true,
+                );
+              } catch (_) {}
+            }());
+          }
+        }
       } else {
         t.state = t.cancel.isCancelled ? 'cancelled' : 'error';
       }

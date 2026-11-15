@@ -140,7 +140,7 @@ class ChatPreview {
         avatar: '${j['other_avatar'] ?? ''}',
         lastMessage: '${j['last_message'] ?? ''}',
         lastTime: _fmtTime(j['last_time']),
-        lastTs: '${j['last_time'] ?? ''}',
+        lastTs: '${(j['last_time_iso'] ?? '').toString().isNotEmpty ? j['last_time_iso'] : (j['last_time'] ?? '')}',
         // v1.3.2 — the file type of the LAST message (was dropped here, so
         // PV previews always showed raw text and never GIF/music/video labels)
         lastFileType: '${j['last_file_type'] ?? 'text'}',
@@ -442,6 +442,7 @@ class RoomMember {
   final bool isOwner;
   final bool isRoomAdmin;
   final String adminTitle;
+  final List<String> adminPerms;
   final bool isPro;
   final bool online;
 
@@ -453,6 +454,7 @@ class RoomMember {
     this.isOwner = false,
     this.isRoomAdmin = false,
     this.adminTitle = '',
+    this.adminPerms = const [],
     this.isPro = false,
     this.online = false,
   });
@@ -462,10 +464,14 @@ class RoomMember {
         username: '${j['username'] ?? ''}',
         name: '${j['name'] ?? ''}',
         avatar: '${j['avatar'] ?? ''}',
-        isOwner: j['is_owner'] == true,
-        isRoomAdmin: j['is_room_admin'] == true,
+        isOwner: j['is_owner'] == true || j['is_owner'] == 1,
+        isRoomAdmin: j['is_room_admin'] == true || j['is_room_admin'] == 1,
         adminTitle: '${j['admin_title'] ?? ''}',
-        isPro: j['is_pro'] == true,
+        adminPerms: ((j['admin_perms'] as List?) ?? const [])
+            .map((e) => '$e')
+            .where((e) => e.isNotEmpty)
+            .toList(),
+        isPro: j['is_pro'] == true || j['is_pro'] == 1,
       );
 }
 
@@ -933,6 +939,9 @@ class Message {
       forwardFrom: '${j['forward_from'] ?? ''}',
       forwardFromUsername: '${j['forward_from_username'] ?? ''}',
       isRead: j['is_read'] == true,
+      isEdited: j['is_edited'] == true,
+      isPro: j['is_pro'] == true,
+      isOfficial: j['is_official'] == true,
       mediaW: mm.w,
       mediaH: mm.h,
       mediaTitle: mm.title,
@@ -960,6 +969,7 @@ class Message {
         'rc': _reactionsToCache(), 'ir': isRead,
         'ff': forwardFrom, 'ffu': forwardFromUsername,
         'ie': isEdited, 'al': albumId,
+        'ip': isPro, 'io': isOfficial, 'at': adminTitle, 'iw': isOwner, 'sc': seenCount,
         'mw': mediaW, 'mh': mediaH, 'mt': mediaTitle, 'ma': mediaArtist,
         'mc': mediaCover, 'md': mediaDurMs, 'iv': isVoiceNote,
         'im': isMusicKind,
@@ -988,6 +998,11 @@ class Message {
         forwardFromUsername: '${j['ffu'] ?? ''}',
         isEdited: j['ie'] == true,
         albumId: '${j['al'] ?? ''}',
+        isPro: j['ip'] == true,
+        isOfficial: j['io'] == true,
+        adminTitle: '${j['at'] ?? ''}',
+        isOwner: j['iw'] == true,
+        seenCount: j['sc'] is int ? j['sc'] as int : int.tryParse('${j['sc']}') ?? 0,
         mediaW: j['mw'] is int ? j['mw'] as int : int.tryParse('${j['mw']}') ?? 0,
         mediaH: j['mh'] is int ? j['mh'] as int : int.tryParse('${j['mh']}') ?? 0,
         mediaTitle: '${j['mt'] ?? ''}',
@@ -999,13 +1014,130 @@ class Message {
       );
 }
 
+/// Real backend-backed Magazine & Profile post (`/api/magazine/posts`).
 class MagazinePost {
+  final int id;
+  final int userId;
+  final String username;
+  final String authorName;
+  final String authorAvatar;
+  final bool authorIsPro;
+  final bool authorIsOfficial;
   final String channel;
-  final String meta;
-  final String text;
-  final int avatarIndex; // 0..3
-  final bool sponsored;
+  final String content;
+  final String mediaUrl;
+  final String category;
+  final int likesCount;
+  final int repliesCount;
+  final int viewsCount;
+  final bool likedByMe;
+  final bool isOwn;
+  final String createdAt;
 
-  const MagazinePost(this.channel, this.meta, this.text, this.avatarIndex,
-      {this.sponsored = false});
+  const MagazinePost({
+    required this.id,
+    this.userId = 0,
+    required this.username,
+    required this.authorName,
+    this.authorAvatar = '',
+    this.authorIsPro = false,
+    this.authorIsOfficial = false,
+    required this.channel,
+    required this.content,
+    this.mediaUrl = '',
+    this.category = 'general',
+    this.likesCount = 0,
+    this.repliesCount = 0,
+    this.viewsCount = 0,
+    this.likedByMe = false,
+    this.isOwn = false,
+    this.createdAt = '',
+  });
+
+  factory MagazinePost.fromJson(Map<String, dynamic> j) {
+    int ii(dynamic v) => v is int ? v : int.tryParse('$v') ?? 0;
+    final uname = '${j['username'] ?? ''}';
+    final aname = '${j['author_name'] ?? ''}'.trim();
+    final ch = '${j['channel'] ?? ''}'.trim();
+    return MagazinePost(
+      id: ii(j['id']),
+      userId: ii(j['user_id']),
+      username: uname,
+      authorName: aname.isNotEmpty ? aname : uname,
+      authorAvatar: '${j['author_avatar'] ?? ''}',
+      authorIsPro: j['author_is_pro'] == true,
+      authorIsOfficial: j['author_is_official'] == true,
+      channel: ch.isNotEmpty ? ch : (aname.isNotEmpty ? aname : uname),
+      content: '${j['content'] ?? ''}',
+      mediaUrl: '${j['media_url'] ?? ''}',
+      category: '${j['category'] ?? 'general'}',
+      likesCount: ii(j['likes_count']),
+      repliesCount: ii(j['replies_count']),
+      viewsCount: ii(j['views_count']),
+      likedByMe: j['liked_by_me'] == true,
+      isOwn: j['is_own'] == true,
+      createdAt: '${j['created_at'] ?? ''}',
+    );
+  }
+
+  MagazinePost copyWith({
+    int? likesCount,
+    int? repliesCount,
+    int? viewsCount,
+    bool? likedByMe,
+  }) =>
+      MagazinePost(
+        id: id,
+        userId: userId,
+        username: username,
+        authorName: authorName,
+        authorAvatar: authorAvatar,
+        authorIsPro: authorIsPro,
+        authorIsOfficial: authorIsOfficial,
+        channel: channel,
+        content: content,
+        mediaUrl: mediaUrl,
+        category: category,
+        likesCount: likesCount ?? this.likesCount,
+        repliesCount: repliesCount ?? this.repliesCount,
+        viewsCount: viewsCount ?? this.viewsCount,
+        likedByMe: likedByMe ?? this.likedByMe,
+        isOwn: isOwn,
+        createdAt: createdAt,
+      );
+}
+
+class MagazineReply {
+  final int id;
+  final int postId;
+  final String username;
+  final String authorName;
+  final String authorAvatar;
+  final String content;
+  final String createdAt;
+
+  const MagazineReply({
+    required this.id,
+    required this.postId,
+    required this.username,
+    required this.authorName,
+    this.authorAvatar = '',
+    required this.content,
+    this.createdAt = '',
+  });
+
+  factory MagazineReply.fromJson(Map<String, dynamic> j) {
+    int ii(dynamic v) => v is int ? v : int.tryParse('$v') ?? 0;
+    final uname = '${j['username'] ?? ''}';
+    final aname = '${j['author_name'] ?? ''}'.trim();
+    return MagazineReply(
+      id: ii(j['id']),
+      postId: ii(j['post_id']),
+      username: uname,
+      authorName: aname.isNotEmpty ? aname : uname,
+      authorAvatar: '${j['author_avatar'] ?? ''}',
+      content: '${j['content'] ?? ''}',
+      createdAt: '${j['created_at'] ?? ''}',
+    );
+  }
 }

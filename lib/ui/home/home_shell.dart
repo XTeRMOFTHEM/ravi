@@ -12,6 +12,7 @@ import '../../core/models.dart' show ChatKind;
 import '../../core/socket_service.dart';
 import '../chat/chat_screen.dart';
 import '../chat/player_bar.dart';
+import 'ai_chat_screen.dart';
 import 'chats_page.dart';
 import 'global_search_screen.dart';
 import 'magazine_page.dart';
@@ -56,6 +57,10 @@ class _HomeShellState extends State<HomeShell> with TickerProviderStateMixin, Wi
       final unread = (d['unread_count'] is int)
           ? d['unread_count'] as int
           : int.tryParse('${d['unread_count']}') ?? 0;
+      if (sender.isNotEmpty && sender != me && unread > 0 && AppState.I.soundsOn.value) {
+        SystemSound.play(SystemSoundType.click);
+        HapticFeedback.lightImpact();
+      }
       // v1.5.0 — اسم نمایشی + آواتار فرستنده داخل ایونت است؛ سطر جدیدِ چت
       // دیگر «سه نقطه بی‌نام و بی‌عکس» نمی‌شود.
       AppState.I.updatePvPreview(
@@ -74,7 +79,15 @@ class _HomeShellState extends State<HomeShell> with TickerProviderStateMixin, Wi
       final roomId = '${d['room_id'] ?? ''}';
       if (roomId.isEmpty) return;
       final reset = d.containsKey('reader');
-      AppState.I.bumpRoomUnread(roomId, reset ? -999 : 1);
+      if (reset) {
+        AppState.I.bumpRoomUnread(roomId, -999);
+      } else {
+        // Ignore echoes of our own messages (room_chats_updated handles preview+unread)
+        final from = '${d['from'] ?? ''}';
+        final me = AppState.I.me.value.username;
+        if (from.isNotEmpty && from == me) return;
+        AppState.I.bumpRoomUnread(roomId, 1);
+      }
     });
     // v1.5.0 — پیش‌نمایش زنده‌ی گروه/کانال بدون رفرش
     _subRoomUpd = SocketService.I.onRoomChatsUpdated.listen((d) {
@@ -82,12 +95,19 @@ class _HomeShellState extends State<HomeShell> with TickerProviderStateMixin, Wi
       if (roomId.isEmpty) return;
       final from = '${d['sender_username'] ?? ''}';
       final me = AppState.I.me.value.username;
+      final delta = (from == me)
+          ? 0
+          : (d['unread'] is int ? d['unread'] as int : int.tryParse('${d['unread']}') ?? 1);
+      if (delta > 0 && AppState.I.soundsOn.value) {
+        SystemSound.play(SystemSoundType.click);
+        HapticFeedback.lightImpact();
+      }
       AppState.I.updateRoomPreview(
         roomId,
         '${d['last_message'] ?? ''}',
         '${d['last_time'] ?? ''}',
         '${d['last_file_type'] ?? ''}',
-        from == me ? 0 : 1,
+        delta,
       );
     });
     // v1.5.0 — رفرش آرام تکراری (بدون رفرش دستی)
@@ -351,6 +371,18 @@ class _HomeShellState extends State<HomeShell> with TickerProviderStateMixin, Wi
                             onTap: () {
                               Navigator.of(context).pop();
                               _openSavedMessages();
+                            },
+                          ),
+                          _divider(p),
+                          _menuItem(
+                            p,
+                            icon: Icons.auto_awesome_rounded,
+                            iconColor: const Color(0xFF8B5CF6),
+                            label: s.aiAssistantTitle,
+                            onTap: () {
+                              Navigator.of(context).pop();
+                              Navigator.of(context, rootNavigator: true)
+                                  .push(AiChatScreen.route());
                             },
                           ),
                           _divider(p),

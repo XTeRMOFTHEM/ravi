@@ -127,7 +127,7 @@ class _MusicPanelBodyState extends State<MusicPanelBody> {
                             imageUrl: avatarUrl,
                             fit: BoxFit.cover,
                             memCacheWidth: 280,
-                            httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                            httpHeaders: ApiService.I.authHeadersFor(avatarUrl),
                             errorWidget: (_, __, ___) => _noteIcon(),
                           ),
                           Container(

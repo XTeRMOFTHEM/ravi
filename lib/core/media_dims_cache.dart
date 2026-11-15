@@ -41,7 +41,9 @@ class MediaDimsCache {
     _map[key] = [width, height];
     // Trim: keep the newest 600 entries.
     if (_map.length > 600) {
-      _map.remove(_map.keys.take(_map.length - 600).toList());
+      for (final oldKey in _map.keys.take(_map.length - 600).toList()) {
+        _map.remove(oldKey);
+      }
     }
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(milliseconds: 900), _save);

@@ -9,6 +9,7 @@ import '../../core/chat_bg.dart';
 import '../../core/constants.dart';
 import '../../core/i18n.dart';
 import '../../core/models.dart';
+import '../../core/player_service.dart';
 import '../../core/socket_service.dart';
 import '../auth/auth_screen.dart';
 import '../widgets/common.dart';
@@ -121,11 +122,24 @@ class _SettingsPageState extends State<SettingsPage>
             sub: AppState.I.lang.value.label,
             trailing: _langSeg(p),
           ),
-          ListRow(
-            icon: Icons.format_size_rounded,
-            title: s.textSize,
-            sub: s.textSizeStandard,
-            onTap: _openTextSizeSheet,
+          ValueListenableBuilder<double>(
+            valueListenable: AppState.I.textScale,
+            builder: (context, scale, _) {
+              final fa = AppState.I.lang.value.isFa;
+              final label = scale <= 0.92
+                  ? (fa ? 'کوچک' : 'Small')
+                  : scale >= 1.25
+                      ? (fa ? 'خیلی بزرگ' : 'Extra large')
+                      : scale >= 1.1
+                          ? (fa ? 'بزرگ' : 'Large')
+                          : s.textSizeStandard;
+              return ListRow(
+                icon: Icons.format_size_rounded,
+                title: s.textSize,
+                sub: label,
+                onTap: _openTextSizeSheet,
+              );
+            },
           ),
         ]),
 
@@ -708,8 +722,13 @@ Future<void> confirmLogout(BuildContext context) async {
     ),
   );
   if (ok == true && context.mounted) {
+    AppState.I.stopAutoRefresh();
+    await PlayerService.I.close();
     await ApiService.I.logout();
-    SocketService.I.configure(cookie: '');
+    SocketService.I.resetSession();
+    AppState.I.archived.value = <ChatPreview>[];
+    AppState.I.setChats(<ChatPreview>[]);
+    AppState.I.me.value = const RaviUser(id: 0, username: '', name: '');
     if (context.mounted) {
       Navigator.of(context, rootNavigator: true)
           .pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const AuthScreen()),
@@ -1071,7 +1090,7 @@ class _WallpaperSheetState extends State<_WallpaperSheet> {
                 imageUrl: ApiService.I.absoluteUrl(serverUrl),
                 fit: BoxFit.cover,
                 memCacheWidth: 160,
-                httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                httpHeaders: ApiService.I.authHeadersFor(serverUrl),
                 errorWidget: (_, __, ___) =>
                     ColoredBox(color: p.bgSoft),
               ),
@@ -1144,7 +1163,7 @@ class _WallpaperSheetState extends State<_WallpaperSheet> {
         Image.network(
           url,
           fit: BoxFit.cover,
-          headers: {'Cookie': ApiService.I.cookieHeader},
+          headers: ApiService.I.authHeadersFor(url),
           errorBuilder: (_, __, ___) => DecoratedBox(
             decoration: BoxDecoration(
                 color: dark ? C.chatFallbackD : C.chatFallbackL),

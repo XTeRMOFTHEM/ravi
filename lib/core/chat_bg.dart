@@ -93,10 +93,16 @@ class BubbleColorStore {
       LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight,
           colors: [c1, c2]);
 
+  static String _scope() {
+    final u = ApiService.I.cachedUsername.toLowerCase().replaceAll(RegExp(r'[^a-z0-9_-]'), '_');
+    return u.isEmpty ? 'default' : u;
+  }
+
   Future<void> load() async {
     try {
       final p = await SharedPreferences.getInstance();
-      key.value = p.getString('bg.bubble') ?? 'classic';
+      final scoped = 'bg.bubble.${_scope()}';
+      key.value = p.getString(scoped) ?? p.getString('bg.bubble') ?? 'classic';
     } catch (_) {}
   }
 
@@ -104,7 +110,7 @@ class BubbleColorStore {
     key.value = k;
     try {
       final p = await SharedPreferences.getInstance();
-      await p.setString('bg.bubble', k);
+      await p.setString('bg.bubble.${_scope()}', k);
     } catch (_) {}
   }
 }
@@ -120,18 +126,23 @@ class ChatBgStore {
   /// v1.0.9 — the user's own wallpapers (server-relative URLs).
   final ValueNotifier<List<String>> customs = ValueNotifier([]);
 
+  static String _scope() {
+    final u = ApiService.I.cachedUsername.toLowerCase().replaceAll(RegExp(r'[^a-z0-9_-]'), '_');
+    return u.isEmpty ? 'default' : u;
+  }
+
   Future<void> load() async {
     try {
       final p = await SharedPreferences.getInstance();
-      // FIRST RUN: default to the messenger-like pack background.
-      final saved = p.getString('pref.chatBg');
+      final sc = _scope();
+      final saved = p.getString('pref.chatBg.$sc') ?? p.getString('pref.chatBg');
       if (saved == null) {
         current.value = ChatBgSetting(presetKey: ChatBgSetting.defaultFirstRun);
-        await p.setString('pref.chatBg', ChatBgSetting.defaultFirstRun);
+        await p.setString('pref.chatBg.$sc', ChatBgSetting.defaultFirstRun);
       } else {
         current.value = ChatBgSetting(presetKey: saved);
       }
-      customs.value = p.getStringList('bg.customs') ?? <String>[];
+      customs.value = p.getStringList('bg.customs.$sc') ?? p.getStringList('bg.customs') ?? <String>[];
     } catch (_) {}
   }
 
@@ -139,7 +150,7 @@ class ChatBgStore {
     current.value = s;
     try {
       final p = await SharedPreferences.getInstance();
-      await p.setString('pref.chatBg', s.presetKey);
+      await p.setString('pref.chatBg.${_scope()}', s.presetKey);
     } catch (_) {}
   }
 
@@ -151,7 +162,7 @@ class ChatBgStore {
     if (select) await set(ChatBgSetting(presetKey: 'url:$serverUrl'));
     try {
       final p = await SharedPreferences.getInstance();
-      await p.setStringList('bg.customs', list);
+      await p.setStringList('bg.customs.${_scope()}', list);
     } catch (_) {}
   }
 
@@ -161,7 +172,7 @@ class ChatBgStore {
     customs.value = list;
     try {
       final p = await SharedPreferences.getInstance();
-      await p.setStringList('bg.customs', list);
+      await p.setStringList('bg.customs.${_scope()}', list);
     } catch (_) {}
     if (current.value.presetKey == 'url:$serverUrl') {
       await set(const ChatBgSetting());
@@ -205,7 +216,7 @@ class ChatBgStore {
               CachedNetworkImage(
                 imageUrl: ApiService.I.absoluteUrl(bg.serverUrl!),
                 fit: BoxFit.cover,
-                httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                httpHeaders: ApiService.I.authHeadersFor(bg.serverUrl!),
                 fadeInDuration: const Duration(milliseconds: 180),
                 errorWidget: (_, __, ___) => DecoratedBox(
                   decoration: BoxDecoration(

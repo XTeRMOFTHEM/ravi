@@ -108,7 +108,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
     final vc = cached != null
         ? VideoPlayerController.file(File(cached))
         : VideoPlayerController.networkUrl(Uri.parse(_url),
-            httpHeaders: {'Cookie': ApiService.I.cookieHeader});
+            httpHeaders: ApiService.I.authHeadersFor(_url));
     _vc = vc;
     setState(() {});
     try {

@@ -306,7 +306,7 @@ class _ForwardScreenState extends State<ForwardScreen> {
                 imageUrl: url,
                 fit: BoxFit.cover,
                 memCacheWidth: 96,
-                httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                httpHeaders: ApiService.I.authHeadersFor(url),
                 errorWidget: (_, __, ___) => Center(
                   child: Text(
                       c.name.isNotEmpty ? c.name[0].toUpperCase() : '?',

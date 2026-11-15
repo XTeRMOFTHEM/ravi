@@ -1098,7 +1098,7 @@ class _ChatScreenState extends State<ChatScreen> {
             final channelMode = widget.kind == ChatKind.channel;
             // v1.0.9 — admins/owner CAN post in channels (is_room_poster);
             // only true non-managers see the read-only bar.
-            final canPost = widget.canPost && _ctl.canPost;
+            final canPost = _ctl.historyLoaded ? _ctl.canPost : widget.canPost;
             final iBlocked = widget.kind == ChatKind.pv &&
                 (pvInfo?.iBlockedThem ?? false);
             final amBlocked = widget.kind == ChatKind.pv &&
@@ -1654,7 +1654,8 @@ class _ChatScreenState extends State<ChatScreen> {
                               ? Image.network(
                                   ApiService.I.avatarUrl(widget.avatarPath),
                                   fit: BoxFit.cover,
-                                  headers: {'Cookie': ApiService.I.cookieHeader},
+                                  headers: ApiService.I.authHeadersFor(
+                                      ApiService.I.avatarUrl(widget.avatarPath)),
                                   errorBuilder: (_, __, ___) => Center(
                                     child: Text(widget.title.isEmpty
                                         ? '?'

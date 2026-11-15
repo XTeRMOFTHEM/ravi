@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 
-/// RAVI ships **not connected** to any backend — point this at your own
-/// RAVI-compatible server (REST + Socket.IO), e.g. 'http://localhost:5000'.
-const String kBaseUrl = '<your-backend-url>';
+/// RAVI backend URL — override at build time with:
+///   flutter run --dart-define=RAVI_BASE_URL=https://your-ravi-server.example
+/// Defaults to placeholder when not configured.
+const String kBaseUrl = String.fromEnvironment(
+  'RAVI_BASE_URL',
+  defaultValue: '<your-backend-url>',
+);
 
 /// ------------------------------------------------------------------
 /// Runtime accent color (Settings → Accent color).

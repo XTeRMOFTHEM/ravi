@@ -222,7 +222,7 @@ class _RoomPreviewBodyState extends State<_RoomPreviewBody> {
                         imageUrl: avatarUrl,
                         fit: BoxFit.cover,
                         memCacheWidth: 160,
-                        httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                        httpHeaders: ApiService.I.authHeadersFor(avatarUrl),
                         errorWidget: (_, __, ___) => Center(
                           child: Text(name.isEmpty ? '?' : name[0].toUpperCase(),
                               style: const TextStyle(

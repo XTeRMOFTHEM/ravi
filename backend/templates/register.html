@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RAVI — Register</title></head>
+<body style="font-family:system-ui,sans-serif;background:#0A1633;color:#fff;padding:24px;">
+  <div style="max-width:380px;margin:48px auto;background:rgba(255,255,255,.06);padding:24px;border-radius:18px;">
+    <h2>ثبت‌نام در RAVI</h2>
+    {% with messages = get_flashed_messages() %}{% for m in messages %}<p style="color:#f87171;">{{ m }}</p>{% endfor %}{% endwith %}
+    <form method="post" action="/register">
+      <input name="username" placeholder="Username" required style="width:100%;padding:10px;margin:6px 0;border-radius:10px;border:0;"><br>
+      <input name="name" placeholder="Display Name" style="width:100%;padding:10px;margin:6px 0;border-radius:10px;border:0;"><br>
+      <input name="password" type="password" placeholder="Password" required style="width:100%;padding:10px;margin:6px 0;border-radius:10px;border:0;"><br>
+      <select name="gender" style="width:100%;padding:10px;margin:6px 0;border-radius:10px;border:0;">
+        <option value="other">Other</option><option value="male">Male</option><option value="female">Female</option>
+      </select><br>
+      <button type="submit" style="width:100%;padding:10px;margin-top:10px;border-radius:10px;border:0;background:#7C3AED;color:#fff;font-weight:700;">Register</button>
+    </form>
+    <p><a href="/login" style="color:#7DD3FC;">Already have an account?</a></p>
+  </div>
+</body>
+</html>

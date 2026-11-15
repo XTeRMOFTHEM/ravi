@@ -42,9 +42,11 @@ class SocketService {
   final _userBlocked = StreamController<Map<String, dynamic>>.broadcast();
   final _userUnblocked = StreamController<Map<String, dynamic>>.broadcast();
   final _roomSettings = StreamController<Map<String, dynamic>>.broadcast();
-  // v1.1.0 — membership events (join / leave / kick / ban) for the thin
-  // glass center toasts, exactly like Telegram's service messages.
+  // v1.1.0 — membership events (ban / kick) and room profile/admin updates
   final _memberEvent = StreamController<Map<String, dynamic>>.broadcast();
+  final _roomMetaUpdated = StreamController<Map<String, dynamic>>.broadcast();
+  final _pvReadAll = StreamController<Map<String, dynamic>>.broadcast();
+  final _messageSeen = StreamController<Map<String, dynamic>>.broadcast();
   // v1.1.1 — pinned-message updates (room + pv)
   final _pinsUpdate = StreamController<Map<String, dynamic>>.broadcast();
   // v1.5.0 — پیش‌نمایش زنده‌ی ردیف گروه/کانال در لیست چت‌ها (بدون رفرش)
@@ -67,11 +69,25 @@ class SocketService {
   Stream<Map<String, dynamic>> get onUserUnblocked => _userUnblocked.stream;
   Stream<Map<String, dynamic>> get onRoomSettings => _roomSettings.stream;
   Stream<Map<String, dynamic>> get onMemberEvent => _memberEvent.stream;
+  Stream<Map<String, dynamic>> get onRoomMetaUpdated => _roomMetaUpdated.stream;
+  Stream<Map<String, dynamic>> get onPvReadAll => _pvReadAll.stream;
+  Stream<Map<String, dynamic>> get onMessageSeen => _messageSeen.stream;
   Stream<Map<String, dynamic>> get onPinsUpdate => _pinsUpdate.stream;
   // v1.5.0 — پیش‌نمایش گروه/کانال (اسم/ساعت/متن آخرین پیام) بدون رفرش
   Stream<Map<String, dynamic>> get onRoomChatsUpdated => _roomChatsUpdated.stream;
 
   bool get connected => _socket?.connected ?? false;
+
+  /// Clears all per-session room subscriptions and pending emit queue.
+  /// Must be called on logout and multi-account switch so the next account
+  /// never replays the previous account's messages or joins its private chats.
+  void resetSession() {
+    _joinedGeneral.clear();
+    _joinedPv.clear();
+    _joinedGroups.clear();
+    _queue.clear();
+    configure(cookie: '');
+  }
 
   /// Attach the (fresh) Flask session cookie. Must be called after
   /// ApiService.init() and again after every login/logout.
@@ -153,20 +169,15 @@ class SocketService {
       ..on('user_unblocked', (d) => _safeAdd(_userUnblocked, d))
       ..on('room_settings_updated', (d) => _safeAdd(_roomSettings, d))
       ..on('error', (d) => _safeAdd(_serverError, d))
-      // v1.1.0 — every plausible membership event name the backend may emit;
-      // unknown ones simply never fire (zero cost).
-      ..on('room_member_joined', (d) => _member(d, 'join'))
-      ..on('member_joined', (d) => _member(d, 'join'))
-      ..on('user_joined', (d) => _member(d, 'join'))
-      ..on('member_added', (d) => _member(d, 'join'))
-      ..on('room_member_left', (d) => _member(d, 'leave'))
-      ..on('member_left', (d) => _member(d, 'leave'))
-      ..on('user_left', (d) => _member(d, 'leave'))
-      ..on('member_kicked', (d) => _member(d, 'kick'))
-      ..on('user_kicked', (d) => _member(d, 'kick'))
-      ..on('member_removed', (d) => _member(d, 'kick'))
-      ..on('member_banned', (d) => _member(d, 'ban'))
-      ..on('user_banned', (d) => _member(d, 'ban'))
+      // Real backend room/membership/read events
+      ..on('room_member_banned', (d) => _member(d, 'ban'))
+      ..on('kicked_from_room', (d) => _member(d, 'kick'))
+      ..on('room_renamed', (d) => _meta(d, 'renamed'))
+      ..on('room_avatar_updated', (d) => _meta(d, 'avatar'))
+      ..on('room_bio_updated', (d) => _meta(d, 'bio'))
+      ..on('room_admins_updated', (d) => _meta(d, 'admins'))
+      ..on('all_pv_messages_read', (d) => _safeAdd(_pvReadAll, d))
+      ..on('message_seen', (d) => _safeAdd(_messageSeen, d))
       // v1.1.1 — pins: room + pv share one stream (payload carries the id)
       ..on('room_pins_update', (d) => _safeAdd(_pinsUpdate, d))
       ..on('pv_pins_update', (d) => _safeAdd(_pinsUpdate, d))
@@ -183,6 +194,13 @@ class SocketService {
     final m = Map<String, dynamic>.from(d);
     m['event_kind'] = kind;
     _memberEvent.add(m);
+  }
+
+  void _meta(dynamic d, String kind) {
+    if (d is! Map) return;
+    final m = Map<String, dynamic>.from(d);
+    m['meta_kind'] = kind;
+    _roomMetaUpdated.add(m);
   }
 
   // ---- room bookkeeping (re-joined automatically on reconnect) ----
