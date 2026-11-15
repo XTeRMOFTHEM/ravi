@@ -52,9 +52,7 @@ class AccountManager {
   static final AccountManager I = AccountManager._();
 
   static const _kAccounts = 'ravi.accounts.v1';
-  static const _secure = FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
-  );
+  static const _secure = FlutterSecureStorage();
 
   List<RaviAccount> _accounts = [];
   int _active = 0;

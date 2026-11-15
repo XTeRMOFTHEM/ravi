@@ -19,9 +19,7 @@ import 'storage_service.dart';
 /// FlutterSecureStorage, migrating any legacy plaintext SharedPreferences entry.
 class CookieJar {
   static const _kKey = 'ravi.session.cookie';
-  static const _secure = FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
-  );
+  static const _secure = FlutterSecureStorage();
   String _cookie = '';
 
   String get header => _cookie;
