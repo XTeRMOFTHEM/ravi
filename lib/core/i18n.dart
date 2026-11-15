@@ -631,7 +631,6 @@ class S {
   String get postDeleted => _t('Post deleted', 'پست حذف شد');
   String get repliesTitle => _t('Replies', 'پاسخ‌ها');
   String get writeReplyHint => _t('Write a reply…', 'پاسخی بنویسید…');
-  String get noPostsYet => _t('No posts yet', 'هنوز پستی منتشر نشده');
   String get noRepliesYet => _t('No replies yet — be the first!', 'هنوز پاسخی ثبت نشده — اولین نفر باشید!');
   String get copiedToClipboard => _t('Copied to clipboard', 'در کلیپ‌بورد کپی شد');
   String get reportReasonHint => _t('Reason (optional)…', 'علت گزارش (اختیاری)…');

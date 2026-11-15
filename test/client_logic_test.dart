@@ -93,7 +93,7 @@ void main() {
 
   group('Localization parity (Fa / En)', () {
     test('all Magazine, AI, and Report strings are non-empty in both languages', () {
-      for (final lang in [Lang.fa, Lang.en]) {
+      for (final lang in const [Lang('fa'), Lang('en')]) {
         final s = S(lang);
         expect(s.navMagazine, isNotEmpty);
         expect(s.newPost, isNotEmpty);

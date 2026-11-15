@@ -76,7 +76,5 @@ void main() {
     AppState.I.kicked.value = false;
   },
       timeout: const Timeout(Duration(seconds: 120)),
-      skip: !hasBackend
-          ? 'Pass --dart-define=RAVI_BASE_URL=http://127.0.0.1:5000 to run live API smoke test.'
-          : false);
+      skip: !hasBackend);
 }
