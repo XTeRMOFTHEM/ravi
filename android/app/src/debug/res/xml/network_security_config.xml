@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug-only network security override: allows HTTP test/dev servers
+     (e.g. local LAN or test IP backends). Never packaged into release APKs,
+     which inherit src/main/res/xml/network_security_config.xml (HTTPS-only). -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

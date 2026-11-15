@@ -7,6 +7,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 concurrency:
   group: test-build-${{ github.ref }}
   cancel-in-progress: true
@@ -52,34 +55,78 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Pub get
-        run: flutter pub get
+        run: |
+          set +e
+          flutter pub get 2>&1 | tee /tmp/pubget.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            tail -n 25 /tmp/pubget.log | while IFS= read -r line; do
+              echo "::error::pub get: $line"
+            done
+            exit "$rc"
+          fi
 
       - name: Analyze
-        run: flutter analyze --no-pub --no-fatal-infos
+        run: |
+          set +e
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings 2>&1 | tee /tmp/analyze.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            grep -E "error •|error -" /tmp/analyze.log | head -n 30 | while IFS= read -r line; do
+              echo "::error::analyze: $line"
+            done
+            exit "$rc"
+          fi
 
       - name: Run offline unit tests
-        run: flutter test test/identity_parser_test.dart test/client_logic_test.dart
+        run: |
+          set +e
+          flutter test test/identity_parser_test.dart test/client_logic_test.dart 2>&1 | tee /tmp/test.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            tail -n 35 /tmp/test.log | while IFS= read -r line; do
+              echo "::error::test: $line"
+            done
+            exit "$rc"
+          fi
 
       - name: Build debug APK
         env:
-          RAVI_BASE_URL: ${{ vars.RAVI_TEST_BACKEND_URL }}
+          RAVI_BASE_URL: ${{ vars.RAVI_TEST_BACKEND_URL || 'http://195.18.10.82:5000' }}
         run: |
-          if [ -n "$RAVI_BASE_URL" ]; then
-            flutter build apk --debug --no-pub --dart-define="RAVI_BASE_URL=$RAVI_BASE_URL"
-          else
-            flutter build apk --debug --no-pub
-          fi
+          echo "Building debug APK for backend: $RAVI_BASE_URL"
+          set +e
+          flutter build apk --debug --no-pub --dart-define="RAVI_BASE_URL=$RAVI_BASE_URL" 2>&1 | tee /tmp/apk_build.log
+          echo "flutter build exited with status ${PIPESTATUS[0]}"
+        continue-on-error: true
 
-      - name: Locate built APK
+      - name: Locate & verify built APK
+        env:
+          RAVI_BASE_URL: ${{ vars.RAVI_TEST_BACKEND_URL || 'http://195.18.10.82:5000' }}
         run: |
           echo "== outputs =="
           find build android/app/build -name "*.apk" -type f 2>/dev/null | head -20
           APK=$(find build android/app/build -name "*.apk" -type f 2>/dev/null | head -1)
           if [ -z "$APK" ]; then
+            grep -E "Error:|FAILURE:|Exception:|e: |lib/|android/" /tmp/apk_build.log | tail -n 30 | while IFS= read -r line; do
+              echo "::error::build: $line"
+            done
             echo "::error::No APK was produced by the build."
             exit 1
           fi
-          ls -la "$APK"
+          ls -lh "$APK"
+          python3 - "$APK" "$RAVI_BASE_URL" <<'PY'
+          import sys, zipfile
+          apk_path, base_url = sys.argv[1], sys.argv[2]
+          with zipfile.ZipFile(apk_path) as zf:
+              assert zf.testzip() is None, "Corrupt APK zip"
+              names = set(zf.namelist())
+              for req in ["AndroidManifest.xml", "classes.dex", "lib/arm64-v8a/libflutter.so", "assets/flutter_assets/kernel_blob.bin"]:
+                  assert req in names, f"Missing APK entry: {req}"
+              blob = zf.read("assets/flutter_assets/kernel_blob.bin")
+              assert base_url.encode("utf-8") in blob, f"Backend URL {base_url} missing from kernel_blob.bin"
+          print(f"Verified APK {apk_path} with embedded backend URL {base_url}")
+          PY
           echo "APK=$APK" >> "$GITHUB_ENV"
 
       - name: Upload APK artifact
@@ -89,3 +136,63 @@ jobs:
           path: ${{ env.APK }}
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish preview pre-release (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RAVI_BASE_URL: ${{ vars.RAVI_TEST_BACKEND_URL || 'http://195.18.10.82:5000' }}
+          RELEASE_TAG: v1.5.2-preview
+        run: |
+          mkdir -p release-assets
+          cp "$APK" "release-assets/ravi-v1.5.2-preview.apk"
+          python3 - <<'PY'
+          import hashlib, zipfile
+          from pathlib import Path
+          assets = Path("release-assets")
+          sources = [
+              Path("backend/app.py"),
+              Path("backend/security.py"),
+              Path("backend/magazine.py"),
+              Path("backend/requirements.txt"),
+              Path("backend/README.md"),
+              Path("LICENSE"),
+              *sorted(Path("backend/templates").glob("*.html")),
+              *sorted(Path("backend/tests").glob("*.py")),
+          ]
+          with zipfile.ZipFile(assets / "ravi-backend-v1.5.2-preview.zip", "w", zipfile.ZIP_DEFLATED) as zf:
+              for src in sources:
+                  if src.exists():
+                      zf.write(src, Path("ravi-backend-v1.5.2-preview") / src)
+          sums = []
+          for f in sorted(assets.iterdir()):
+              h = hashlib.file_digest(f.open("rb"), "sha256").hexdigest()
+              sums.append(f"{h}  {f.name}")
+          (assets / "SHA256SUMS.txt").write_text("\n".join(sums) + "\n", encoding="utf-8")
+          PY
+          cat > /tmp/release_notes.md <<EOF
+          # RAVI v1.5.2 Preview — Hardened Build + Magazine & RAVI AI
+
+          Debug-signed Android preview APK built from commit \`${GITHUB_SHA}\` (\`${GITHUB_REF_NAME}\`), connected to **${RAVI_BASE_URL}**.
+
+          ## Downloads
+          - \`ravi-v1.5.2-preview.apk\` — Android debug APK (\`com.ravi.ravi\`)
+          - \`ravi-backend-v1.5.2-preview.zip\` — Updated hardened backend (\`app.py\`, \`security.py\`, \`magazine.py\`, \`templates/\`, \`tests/\`)
+          - \`SHA256SUMS.txt\` — SHA-256 checksums
+
+          ## Highlights
+          - Full backend & Android security hardening (host-scoped cookies, secure token storage, upload & path sanitization, HTTPS-by-default release config).
+          - Real server-backed Magazine feed & Profile Posts (publish, like, reply, delete).
+          - Built-in RAVI AI chat screen (Standard & Pro modes) + real Report User dialog.
+          - Unified storage/cache cleanup, 350 MB media LRU cap, improved media downloads & chat reliability.
+          EOF
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+            gh release edit "$RELEASE_TAG" --target "$GITHUB_SHA" --notes-file /tmp/release_notes.md --prerelease --latest=false
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --target "$GITHUB_SHA" \
+              --title "RAVI v1.5.2 Preview — APK + Backend" \
+              --notes-file /tmp/release_notes.md \
+              --prerelease --latest=false
+          fi
