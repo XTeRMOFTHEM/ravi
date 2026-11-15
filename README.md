@@ -2,7 +2,7 @@
 
 <img src="docs/banner.png" alt="RAVI — Connect · Chat · Play" width="100%" />
 
-[![Version](https://img.shields.io/badge/Version-1.5.0-5865F2?style=flat-square)](/../../releases)
+[![Version](https://img.shields.io/badge/Version-1.5.1-5865F2?style=flat-square)](/../../releases)
 [![Flutter](https://img.shields.io/badge/Flutter-3.13+-02569B?style=flat-square&logo=flutter&logoColor=white)](https://flutter.dev)
 [![Dart](https://img.shields.io/badge/Dart-3.13+-0175C2?style=flat-square&logo=dart&logoColor=white)](https://dart.dev)
 [![Socket.IO](https://img.shields.io/badge/Realtime-Socket.IO-white?style=flat-square&logo=socketdotio&logoColor=white)](https://socket.io)
@@ -36,11 +36,10 @@
 - **🧹 Data & storage** — clear caches, manage downloads, global search across chats.
 - **⚡ Performance-first** — cached list extents, constant list animations and clamping scroll physics keep it smooth on low-end phones.
 
-### 🔌 Backend — "not connected by design"
+### 🔌 Backend — ready to run
 
-> [!IMPORTANT]
-> **This repository contains the RAVI *client* only.**
-> It ships with **no backend** — straight after cloning and building, the app is **not connected to any server**. To run a fully working messenger you need to connect it to your own **RAVI-compatible backend**.
+> [!NOTE]
+> This repository ships the RAVI **client**, and the app still builds **not connected** by default — straight after cloning, `kBaseUrl` points nowhere. To run a fully working messenger you connect it to a **RAVI-compatible backend**.
 
 1. Set your server address in **`lib/core/constants.dart`**:
 
@@ -48,8 +47,8 @@
    const String kBaseUrl = '<your-backend-url>'; // e.g. 'http://localhost:5000'
    ```
 
-2. A compatible backend must expose a small REST surface — auth/user (`/api/user`), sessions (`/api/sessions`), rooms (`/api/rooms`, `/api/room`), private chats (`/api/pv/…`), avatar frames (`/api/frames`) — plus the **Socket.IO** realtime layer (messages, typing, reads, reactions, room events).
-3. The backend itself is **not part of this repository**; the client is fully server-agnostic and can be pointed at any compatible deployment.
+2. **A ready-to-run RAVI backend now lives in this repository** — see [`backend/`](backend) and its [README](backend/README.md) for the fast/quick run guide (`pip install -r requirements.txt && python app.py`).
+3. The backend exposes a small REST surface — auth/user (`/api/user`), sessions (`/api/sessions`), rooms (`/api/rooms`, `/api/room`), private chats (`/api/pv/…`), avatar frames (`/api/frames`) — plus the **Socket.IO** realtime layer (messages, typing, reads, reactions, room events). The client is server-agnostic and can be pointed at any compatible deployment.
 
 ### 🚀 Getting started
 
@@ -61,7 +60,7 @@ flutter run                 # run on a device/emulator
 flutter build apk --release # release APK
 ```
 
-> Requires Flutter SDK `^3.13.5` (Dart 3.13+). App icons are generated with `flutter_launcher_icons` from `assets/images/`; use your own keystore for release signing.
+> Requires Flutter SDK `3.44+` (Dart `3.13+`). App icons are generated with `flutter_launcher_icons` from `assets/images/`; use your own keystore for release signing.
 
 ### 🗂 Project structure
 
@@ -113,11 +112,10 @@ lib/
 - **🧹 داده و حافظه** — پاک‌سازی کش‌ها، مدیریت دانلودها، جست‌وجوی سراسری.
 - **⚡ اولویت پرفورمنس** — کشِ گستره‌ی لیست‌ها، انیمیشن ثابت ردیف‌ها و فیزیک Clamping برای نرمی روی گوشی‌های ضعیف.
 
-### 🔌 بک‌اند — «عمداً وصل نیست»
+### 🔌 بک‌اند — آماده‌ی اجرا
 
-> [!IMPORTANT]
-> **این ریپو فقط «کلاینت» راوی است.**
-> **هیچ بک‌اندی همراهش منتشر نمی‌شود** — بلافاصله بعد از کلون و بیلد، اپ **به هیچ سروری وصل نیست**. برای اجرای یک چت واقعاً زنده باید آن را به یک **بک‌اندِ سازگارِ راوی** وصل کنید.
+> [!NOTE]
+> این ریپو **کلاینتِ** راوی است و اپ همچنان به‌صورت پیش‌فرض **وصل‌نشده** بیلد می‌شود — بلافاصله بعد از کلون، `kBaseUrl` به جایی اشاره نمی‌کند. برای اجرای یک چت واقعاً زنده باید اپ را به یک **بک‌اندِ سازگارِ راوی** وصل کنید.
 
 1. آدرس سرور را در **`lib/core/constants.dart`** تنظیم کنید:
 
@@ -125,8 +123,8 @@ lib/
    const String kBaseUrl = '<your-backend-url>'; // مثلاً 'http://localhost:5000'
    ```
 
-2. یک بک‌اند سازگار یک رستِ کوچک ارائه می‌دهد — احراز هویت و کاربر (`/api/user`)، نشست‌ها (`/api/sessions`)، اتاق‌ها (`/api/rooms`، `/api/room`)، چت خصوصی (`/api/pv/…`)، قاب‌ها (`/api/frames`) — به‌علاوه‌ی لایه‌ی لحظه‌ایِ **Socket.IO** (پیام، تایپ، خوانده‌شده، ری‌اکشن، ایونت‌های اتاق).
-3. کد بک‌اند در این ریپو **نیست**؛ کلاینت کاملاً سرور-مستقل است و به هر استقرارِ سازگاری وصل می‌شود.
+2. **یک بک‌اندِ آماده‌ی اجرای راوی حالا داخل همین ریپو است** — پوشه‌ی [`backend/`](backend) و [README](backend/README.md) آن را برای راهنمای اجرای سریع ببینید (`pip install -r requirements.txt && python app.py`).
+3. بک‌اند یک رستِ کوچک ارائه می‌دهد — احراز هویت و کاربر (`/api/user`)، نشست‌ها (`/api/sessions`)، اتاق‌ها (`/api/rooms`، `/api/room`)، چت خصوصی (`/api/pv/…`)، قاب‌ها (`/api/frames`) — به‌علاوه‌ی لایه‌ی لحظه‌ایِ **Socket.IO** (پیام، تایپ، خوانده‌شده، ری‌اکشن، ایونت‌های اتاق). کلاینت کاملاً سرور-مستقل است و به هر استقرارِ سازگاری وصل می‌شود.
 
 ### 🚀 شروع کار
 
@@ -138,7 +136,7 @@ flutter run                  # اجرا روی گوشی/شبیه‌ساز
 flutter build apk --release  # خروجی نهایی
 ```
 
-> به Flutter SDK `^3.13.5` نگهش دارید (Dart 3.13+). آیکون‌های اپ با `flutter_launcher_icons` از `assets/images/` ساخته می‌شوند؛ برای امضای ریلیز از keystore خودتان استفاده کنید.
+> به Flutter SDK `3.44+` (Dart `3.13+`) نیاز دارید. آیکون‌های اپ با `flutter_launcher_icons` از `assets/images/` ساخته می‌شوند؛ برای امضای ریلیز از keystore خودتان استفاده کنید.
 
 ### 🗂 ساختار پروژه
 
@@ -173,6 +171,6 @@ lib/
 
 <div align="center">
 
-**RAVI v1.5.0** · Built with 💙 · MIT licensed — see [LICENSE](LICENSE)
+**RAVI v1.5.1** · Built with 💙 · MIT licensed — see [LICENSE](LICENSE)
 
 </div>

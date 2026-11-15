@@ -1,0 +1,52 @@
+name: Test Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  backend-check:
+    name: Backend syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile-check app.py
+        run: python -m py_compile backend/app.py
+
+  build-apk:
+    name: Build test APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: "3.47.9"
+          cache: true
+
+      - name: Point app at test backend
+        run: |
+          sed -i "s|const String kBaseUrl = '<your-backend-url>';|const String kBaseUrl = 'http://195.18.10.82:5000';|" lib/core/constants.dart
+          grep -n "kBaseUrl" lib/core/constants.dart
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --no-pub
+
+      - name: Build debug APK
+        run: flutter build apk --debug --no-pub
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ravi-test-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 14
