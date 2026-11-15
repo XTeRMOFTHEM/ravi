@@ -3,43 +3,60 @@
 <img src="docs/banner.png" alt="RAVI — Connect · Chat · Play" width="100%" />
 
 [![Version](https://img.shields.io/badge/Version-1.5.1-5865F2?style=flat-square)](/../../releases)
-[![Flutter](https://img.shields.io/badge/Flutter-3.13+-02569B?style=flat-square&logo=flutter&logoColor=white)](https://flutter.dev)
+[![Flutter](https://img.shields.io/badge/Flutter-3.44+-02569B?style=flat-square&logo=flutter&logoColor=white)](https://flutter.dev)
 [![Dart](https://img.shields.io/badge/Dart-3.13+-0175C2?style=flat-square&logo=dart&logoColor=white)](https://dart.dev)
 [![Socket.IO](https://img.shields.io/badge/Realtime-Socket.IO-white?style=flat-square&logo=socketdotio&logoColor=white)](https://socket.io)
+[![Backend](https://img.shields.io/badge/Backend-Python%2FFlask-3776AB?style=flat-square&logo=python&logoColor=white)](backend)
 [![License: MIT](https://img.shields.io/badge/License-MIT-F7DF1E?style=flat-square)](LICENSE)
-
-<br/>
-
-[![🇬🇧 English](https://img.shields.io/badge/🇬🇧_English-English-1152C4?style=for-the-badge&logo=readme&logoColor=white)](#-english)
-[![🇮🇷 فارسی](https://img.shields.io/badge/🇮🇷_فارسی-Persian-0E7B45?style=for-the-badge&logo=readme&logoColor=white)](#-فارسی)
 
 </div>
 
 ---
 
-## 🇬🇧 English
-
 **RAVI** — *Connect · Chat · Play* — a fast, smooth, cross-platform messenger built with **Flutter**: private chats, groups, public rooms and channels with **Socket.IO** realtime messaging, rich media, full theming and deep personalization.
 
-### ✨ Features
+## Features
 
-- **💬 Realtime messaging** — private chats, groups, the public room and channels powered by **Socket.IO**: live typing indicators, read receipts, and unread badges/previews that update **without any refresh**.
-- **📥 Smart media downloads** — photos & videos auto-download to a permanent on-disk cache (works offline afterwards); videos stream over HTTP Range even mid-download; circular progress rings, Telegram-style.
-- **📎 File bubbles for every format** — zip / pdf / apk / docx / iso and more get per-format icons, the real file name, size, a progress ring and a delivery tick.
-- **🎙 Audio & music** — voice messages and a built-in music player with a persistent player bar.
-- **🏃 Reactions, swipe-to-reply, forward, delete, @mentions** — everything a modern chat needs.
-- **📣 Channels** — admin-only posting with a clean, message-only channel view.
-- **🖼 Avatar frames** — 7 fresh frames (Baroque, Butterfly, Gothic, Silver Stars, Stars Outline, Thorns, Wings), a live-preview frame picker, and a server-driven frame list (`GET /api/frames`) so new frames ship without an app update.
-- **⭐ Animated PREMIUM badge** — the animated premium emblem plays on profiles (8s cycle) with a lightweight static version in lists.
-- **🎨 Personalization** — light & dark themes, **8 live accent colors** that recolor the whole app instantly, selectable chat backgrounds, Vazirmatn & Inter typography (Fa/En).
-- **👤 Multi-account** — switch between saved accounts right from the app.
-- **🧹 Data & storage** — clear caches, manage downloads, global search across chats.
-- **⚡ Performance-first** — cached list extents, constant list animations and clamping scroll physics keep it smooth on low-end phones.
+### <img src="docs/icons/zap.svg" width="20"> Realtime messaging
+Private chats, groups, the public room and channels powered by **Socket.IO**: live typing indicators, read receipts, and unread badges/previews that update **without any refresh**.
 
-### 🔌 Backend — ready to run
+### <img src="docs/icons/download.svg" width="20"> Smart media downloads
+Photos and videos auto-download to a permanent on-disk cache (works offline afterwards); videos stream over HTTP Range even mid-download; circular progress rings, Telegram-style.
+
+### <img src="docs/icons/file.svg" width="20"> File bubbles for every format
+zip / pdf / apk / docx / iso and more get per-format icons, the real file name, size, a progress ring and a delivery tick.
+
+### <img src="docs/icons/mic.svg" width="20"> Audio and music
+Voice messages and a built-in music player with a persistent player bar.
+
+### <img src="docs/icons/chat.svg" width="20"> Modern chat tooling
+Reactions, swipe-to-reply, forward, delete and @mentions — everything a modern chat needs.
+
+### <img src="docs/icons/megaphone.svg" width="20"> Channels
+Admin-only posting with a clean, message-only channel view and live view counters.
+
+### <img src="docs/icons/image.svg" width="20"> Avatar frames
+7 frames (Baroque, Butterfly, Gothic, Silver Stars, Stars Outline, Thorns, Wings), a live-preview frame picker, and a server-driven frame list (`GET /api/frames`) so new frames ship without an app update.
+
+### <img src="docs/icons/star.svg" width="20"> Animated PREMIUM badge
+The animated premium emblem plays on profiles (8s cycle) with a lightweight static version in lists.
+
+### <img src="docs/icons/palette.svg" width="20"> Personalization
+Light and dark themes, **8 live accent colors** that recolor the whole app instantly, selectable chat backgrounds, Vazirmatn and Inter typography (Fa/En).
+
+### <img src="docs/icons/user.svg" width="20"> Multi-account
+Switch between saved accounts right from the app.
+
+### <img src="docs/icons/folder.svg" width="20"> Data and storage
+Clear caches, manage downloads, global search across chats.
+
+### <img src="docs/icons/rocket.svg" width="20"> Performance-first
+Cached list extents, constant list animations and clamping scroll physics keep it smooth on low-end phones.
+
+## Backend
 
 > [!NOTE]
-> This repository ships the RAVI **client**, and the app still builds **not connected** by default — straight after cloning, `kBaseUrl` points nowhere. To run a fully working messenger you connect it to a **RAVI-compatible backend**.
+> This repository ships the RAVI **client**, and the app builds **not connected** by default — straight after cloning, `kBaseUrl` points nowhere. To run a fully working messenger you connect it to a **RAVI-compatible backend**.
 
 1. Set your server address in **`lib/core/constants.dart`**:
 
@@ -47,10 +64,10 @@
    const String kBaseUrl = '<your-backend-url>'; // e.g. 'http://localhost:5000'
    ```
 
-2. **A ready-to-run RAVI backend now lives in this repository** — see [`backend/`](backend) and its [README](backend/README.md) for the fast/quick run guide (`pip install -r requirements.txt && python app.py`).
+2. **A ready-to-run RAVI backend lives in this repository** — see [`backend/`](backend) and its [README](backend/README.md) for the fast/quick run guide (`pip install -r requirements.txt && python app.py`).
 3. The backend exposes a small REST surface — auth/user (`/api/user`), sessions (`/api/sessions`), rooms (`/api/rooms`, `/api/room`), private chats (`/api/pv/…`), avatar frames (`/api/frames`) — plus the **Socket.IO** realtime layer (messages, typing, reads, reactions, room events). The client is server-agnostic and can be pointed at any compatible deployment.
 
-### 🚀 Getting started
+## Getting started
 
 ```bash
 git clone https://github.com/XTeRMOFTHEM/ravi.git
@@ -62,17 +79,17 @@ flutter build apk --release # release APK
 
 > Requires Flutter SDK `3.44+` (Dart `3.13+`). App icons are generated with `flutter_launcher_icons` from `assets/images/`; use your own keystore for release signing.
 
-### 🗂 Project structure
+## Project structure
 
 ```
 lib/
 ├── main.dart                     # Entrypoint
-├── ravi_app.dart                 # Root widget — theme & locale wiring
+├── ravi_app.dart                 # Root widget — theme and locale wiring
 ├── core/
 │   ├── api_service.dart          # REST client (auth, rooms, chats, media, frames)
 │   ├── socket_service.dart       # Socket.IO realtime layer
 │   ├── chat_controller.dart      # Chat state machine
-│   ├── app_state.dart            # Session, language & preferences
+│   ├── app_state.dart            # Session, language and preferences
 │   ├── account_manager.dart      # Multi-account store
 │   ├── media_download_manager.dart # Smart media downloads w/ progress
 │   ├── audio_cache_service.dart  # Permanent audio cache
@@ -91,86 +108,8 @@ lib/
 
 ---
 
-## 🇮🇷 فارسی
-
-<div dir="rtl" align="right">
-
-**راوی** — *ارتباط · چت · بازی* — یک پیام‌رسان سریع و روانِ چندسکویی ساخته‌شده با **فلاتر**: چت خصوصی، گروه، اتاق عمومی و کانال‌ها با پیام‌رسانی لحظه‌ایِ Socket.IO، رسانه‌ی کامل، تم‌بندی و شخصی‌سازی عمیق.
-
-### ✨ امکانات
-
-- **💬 پیام‌رسانی لحظه‌ای** — چت خصوصی، گروه، اتاق عمومی و کانال‌ها روی **Socket.IO**: تایپِ زنده، تیک خوانده‌شدن، و بج‌ها و پیش‌نمایش‌های ناخوانده که **بدون هیچ رفرشی** به‌روز می‌شوند.
-- **📥 دانلود هوشمند رسانه** — عکس و ویدئو خودکار دانلود و برای همیشه روی دیسک ذخیره می‌شوند (بعدش بدون اینترنت هم پخش می‌شود)؛ ویدئو حتی حین دانلود با HTTP Range استریم می‌شود؛ حلقه‌ی پیشرفت دایره‌ای، به سبک تلگرام.
-- **📎 حباب فایل برای هر فرمتی** — zip / pdf / apk / docx / iso و… آیکون مخصوص فرمت، نام و حجم واقعی، حلقه‌ی درصد و تیکِ تحویل.
-- **🎙 صدا و موسیقی** — ویس، پخش‌کننده‌ی موسیقی داخلی با نوار پخشِ ماندگار.
-- **🏃 ری‌اکشن، ریپلای با سوایپ، فوروارد، حذف، منشن (@)** — همه‌چیزِ یک چت مدرن.
-- **📣 کانال‌ها** — ارسال فقط برای ادمین‌ها و نمای تمیزِ «فقط پیام».
-- **🖼 قاب آواتار** — ۷ قاب جدید (باروک، پروانه، گوتیک، ستاره‌های نقره‌ای، ستاره‌های خطی، خارها، بال‌ها)، فریم‌پیکر با **پیش‌نمایش زنده**، و لیست قاب‌ها مستقیم از سرور (`GET /api/frames`) — قاب جدید = بدون آپدیت اپ.
-- **⭐ بج انیمیشنی PREMIUM** — روی پروفایل‌ها با چرخه‌ی ۸ ثانیه، و در لیست‌ها نسخه‌ی ثابتِ سبک.
-- **🎨 شخصی‌سازی** — تم روشن/تاریک، **۸ رنگ اکسنتِ زنده** که تمام اپ را لحظه‌ای عوض می‌کنند، پس‌زمینه‌های انتخابی چت، فونت‌های وزیرمتن و Inter (فا/ان).
-- **👤 چندحسابی** — جابه‌جایی سریع بین حساب‌های ذخیره‌شده از خود اپ.
-- **🧹 داده و حافظه** — پاک‌سازی کش‌ها، مدیریت دانلودها، جست‌وجوی سراسری.
-- **⚡ اولویت پرفورمنس** — کشِ گستره‌ی لیست‌ها، انیمیشن ثابت ردیف‌ها و فیزیک Clamping برای نرمی روی گوشی‌های ضعیف.
-
-### 🔌 بک‌اند — آماده‌ی اجرا
-
-> [!NOTE]
-> این ریپو **کلاینتِ** راوی است و اپ همچنان به‌صورت پیش‌فرض **وصل‌نشده** بیلد می‌شود — بلافاصله بعد از کلون، `kBaseUrl` به جایی اشاره نمی‌کند. برای اجرای یک چت واقعاً زنده باید اپ را به یک **بک‌اندِ سازگارِ راوی** وصل کنید.
-
-1. آدرس سرور را در **`lib/core/constants.dart`** تنظیم کنید:
-
-   ```dart
-   const String kBaseUrl = '<your-backend-url>'; // مثلاً 'http://localhost:5000'
-   ```
-
-2. **یک بک‌اندِ آماده‌ی اجرای راوی حالا داخل همین ریپو است** — پوشه‌ی [`backend/`](backend) و [README](backend/README.md) آن را برای راهنمای اجرای سریع ببینید (`pip install -r requirements.txt && python app.py`).
-3. بک‌اند یک رستِ کوچک ارائه می‌دهد — احراز هویت و کاربر (`/api/user`)، نشست‌ها (`/api/sessions`)، اتاق‌ها (`/api/rooms`، `/api/room`)، چت خصوصی (`/api/pv/…`)، قاب‌ها (`/api/frames`) — به‌علاوه‌ی لایه‌ی لحظه‌ایِ **Socket.IO** (پیام، تایپ، خوانده‌شده، ری‌اکشن، ایونت‌های اتاق). کلاینت کاملاً سرور-مستقل است و به هر استقرارِ سازگاری وصل می‌شود.
-
-### 🚀 شروع کار
-
-```bash
-git clone https://github.com/XTeRMOFTHEM/ravi.git
-cd ravi
-flutter pub get
-flutter run                  # اجرا روی گوشی/شبیه‌ساز
-flutter build apk --release  # خروجی نهایی
-```
-
-> به Flutter SDK `3.44+` (Dart `3.13+`) نیاز دارید. آیکون‌های اپ با `flutter_launcher_icons` از `assets/images/` ساخته می‌شوند؛ برای امضای ریلیز از keystore خودتان استفاده کنید.
-
-### 🗂 ساختار پروژه
-
-```
-lib/
-├── main.dart                     # نقطه شروع
-├── ravi_app.dart                 # ریشه‌ی اپ — تم و زبان
-├── core/
-│   ├── api_service.dart          # کلاینت REST (ورود، اتاق‌ها، چت، رسانه، قاب‌ها)
-│   ├── socket_service.dart       # لایه‌ی لحظه‌ای Socket.IO
-│   ├── chat_controller.dart      # ماشین حالت چت
-│   ├── app_state.dart            # نشست، زبان و تنظیمات
-│   ├── account_manager.dart      # چندحسابی
-│   ├── media_download_manager.dart # دانلود هوشمند رسانه با پیشرفت
-│   ├── audio_cache_service.dart  # کش دائمی صدا
-│   ├── storage_service.dart      # حافظه‌ی دائمی مدیا روی دیسک
-│   ├── player_service.dart       # پخش صدا
-│   ├── chat_bg.dart              # پس‌زمینه‌های چت
-│   ├── i18n.dart                 # متن‌های انگلیسی / فارسی
-│   └── constants.dart            # توکن‌های طراحی، پالت‌ها و kBaseUrl
-└── ui/
-    ├── splash_screen.dart
-    ├── auth/auth_screen.dart
-    ├── chat/                     # صفحه چت، حباب‌ها، پیش‌نمایش‌ها، نوار پخش…
-    ├── home/                     # چت‌ها، پروفایل، تنظیمات، اطلاعات گروه…
-    └── widgets/                  # بج پرمیوم، هشدارها، ویجت‌های مشترک
-```
-
-</div>
-
----
-
 <div align="center">
 
-**RAVI v1.5.1** · Built with 💙 · MIT licensed — see [LICENSE](LICENSE)
+**RAVI v1.5.1** · MIT licensed — see [LICENSE](LICENSE)
 
 </div>

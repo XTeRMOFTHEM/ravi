@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔌 RAVI Backend
+# RAVI Backend
 
 **The official RAVI-compatible server — fast to run, easy to deploy.**
 
@@ -16,19 +16,32 @@
 
 ---
 
-## ⚡ What it is
+## What it is
 
-A complete, production-minded **REST + Socket.IO** backend for the **RAVI** Flutter client:
+A complete, production-minded **REST + Socket.IO** backend for the **RAVI** Flutter client.
 
-- **💬 Realtime messaging** — private chats, groups, public room and channels over **Socket.IO**: typing, read receipts, reactions, replies, forwards, deletes, edits and live unread badges.
-- **🔐 Accounts & sessions** — register/login with hashed passwords (Flask-Login), session cookies, multi-device session list, profile editing with avatars and bios.
-- **🚫 Moderation** — two-way block system, user reporting, per-room admins with custom titles and permissions, slow mode, chat locks, media/GIF permissions, bans with in-chat system messages.
-- **📣 Groups & channels** — public/private rooms, join links, member visibility modes, channel post view counters.
-- **📦 Media** — image/video/audio/file upload, HTTP **Range** streaming for video and audio, ffmpeg-powered **GIF conversion**, server-side avatar frames.
-- **⭐ Extras** — pro accounts, follows/followers, saved GIFs gallery, global search, an offline keyword-based AI assistant, and optional **OpenRouter**-powered AI Pro chat.
-- **🗃 Storage** — SQLite with WAL mode; no database server required.
+### <img src="../docs/icons/zap.svg" width="20"> Realtime messaging
+Private chats, groups, the public room and channels over **Socket.IO**: typing, read receipts, reactions, replies, forwards, deletes, edits and live unread badges.
 
-## 🚀 Quick run
+### <img src="../docs/icons/lock.svg" width="20"> Accounts and sessions
+Register/login with hashed passwords (Flask-Login), session cookies, multi-device session list, profile editing with avatars and bios.
+
+### <img src="../docs/icons/shield.svg" width="20"> Moderation
+Two-way block system, user reporting, per-room admins with custom titles and permissions, slow mode, chat locks, media/GIF permissions, bans with in-chat system messages.
+
+### <img src="../docs/icons/users.svg" width="20"> Groups and channels
+Public/private rooms, join links, member visibility modes, channel post view counters.
+
+### <img src="../docs/icons/image.svg" width="20"> Media
+Image/video/audio/file upload, HTTP **Range** streaming for video and audio, ffmpeg-powered **GIF conversion**, server-side avatar frames.
+
+### <img src="../docs/icons/star.svg" width="20"> Extras
+Pro accounts, follows/followers, saved GIFs gallery, global search, an offline keyword-based AI assistant, and optional **OpenRouter**-powered AI Pro chat.
+
+### <img src="../docs/icons/folder.svg" width="20"> Storage
+SQLite with WAL mode; no database server required.
+
+## Quick run
 
 > Requires **Python 3.10+**. No database setup, no config files — it just works.
 
@@ -46,34 +59,36 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Done — the server is live at **`http://0.0.0.0:5000`** 🎉
+Done — the server is live at **`http://0.0.0.0:5000`**.
 
 Now point the RAVI app at it: set `kBaseUrl` in `lib/core/constants.dart` to `http://YOUR_SERVER_IP:5000` and rebuild the app.
 
-### 🔧 Configuration (environment variables)
+## Configuration
 
-| Variable              | Default | Purpose                                        |
-| --------------------- | ------- | ---------------------------------------------- |
-| `PORT`                | `5000`  | HTTP/Socket.IO listen port                     |
-| `SECRET_KEY`          | *(auto)* | Session secret — set it for multi-process deploys (see below) |
-| `OPENROUTER_API_KEY`  | *(none)* | Enables the AI Pro chat; the endpoint answers "disabled" without it |
+Environment variables:
+
+| Variable              | Default   | Purpose                                              |
+| --------------------- | --------- | ---------------------------------------------------- |
+| `PORT`                | `5000`    | HTTP/Socket.IO listen port                           |
+| `SECRET_KEY`          | *(auto)*  | Session secret — set it for multi-process deploys    |
+| `OPENROUTER_API_KEY`  | *(none)*  | Enables the AI Pro chat; the endpoint answers "disabled" without it |
 
 If `SECRET_KEY` is not set, the server creates a persistent local `.secret` file on first start, so sessions survive restarts.
 
-### 🌐 Production tips
+## Production tips
 
 - Put the server behind **nginx** and proxy both HTTP and the Socket.IO WebSocket upgrade; keep `X-Forwarded-For` so client IPs are recorded correctly.
 - Open **only port 5000** (or your custom `PORT`) to the app, never the SQLite file.
 - ffmpeg is bundled automatically via `imageio-ffmpeg`; if you prefer the system binary, just make sure `ffmpeg` is on `PATH`.
 - For heavier loads, run multiple processes (gunicorn + `flask-socketio` workers) with a shared `SECRET_KEY` env var.
 
-## 🗂 API surface
+## API surface
 
 **REST** — `/api/user`, `/api/sessions`, `/api/rooms`, `/api/room`, `/api/pv/…`, `/api/frames`, `/api/health`, media upload/download endpoints, admin panel routes, and more.
 
 **Socket.IO** — namespace `/`: `send_message`, `typing`, `group_read`, `reactions`, `delete_message`, `forward` … with per-user rooms (`user_<id>`), private-chat rooms (`pv_<chat_id>`) and group rooms (`private_<room_id>`).
 
-## 🛡 Security notes
+## Security notes
 
 - Passwords are stored **hashed** (werkzeug `scrypt`).
 - Private content is emitted **only** to the rooms of the chat's actual participants — never broadcast to everyone.
@@ -84,6 +99,6 @@ If `SECRET_KEY` is not set, the server creates a persistent local `.secret` file
 
 <div align="center">
 
-**RAVI Backend v1.5.1** · Built with 💙 · MIT licensed — see [LICENSE](../LICENSE)
+**RAVI Backend v1.5.1** · MIT licensed — see [LICENSE](../LICENSE)
 
 </div>
