@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -31,19 +32,21 @@ Future<void> main() async {
     systemNavigationBarContrastEnforced: false,
   ));
 
-  // v1.0.5: never show the ugly gray-red ErrorWidget in release — a soft,
-  // themed placeholder keeps the app usable (fixes the "gray box" reports).
-  ErrorWidget.builder = (details) {
-    if (details.exception is FlutterError) {
-      FlutterError.presentError(details);
-    }
-    return Container(
-      color: const Color(0x00FFFFFF),
-      alignment: Alignment.center,
-      padding: const EdgeInsets.all(16),
-      child: const SizedBox.shrink(),
-    );
-  };
+  // Never show the ugly gray-red ErrorWidget in release — keep the redscreen
+  // visible in debug builds so layout bugs are caught during development.
+  if (kReleaseMode) {
+    ErrorWidget.builder = (details) {
+      if (details.exception is FlutterError) {
+        FlutterError.presentError(details);
+      }
+      return Container(
+        color: const Color(0x00FFFFFF),
+        alignment: Alignment.center,
+        padding: const EdgeInsets.all(16),
+        child: const SizedBox.shrink(),
+      );
+    };
+  }
 
   await Future.wait([
     ApiService.I.init(),

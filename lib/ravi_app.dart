@@ -50,6 +50,46 @@ class _RaviAppState extends State<RaviApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     // Session died mid-app (cookie expired / server restart) → back to auth.
     AppState.I.kicked.addListener(_onKicked);
+    // Attach global ToastBus once (instead of on every MaterialApp.builder rebuild)
+    ToastBus.attach(_showGlobalToast);
+  }
+
+  void _showGlobalToast(String msg) {
+    final ctx = RaviApp.navKey.currentContext;
+    if (ctx == null) return;
+    final overlay = Overlay.maybeOf(ctx, rootOverlay: true);
+    if (overlay == null) return;
+    final entry = OverlayEntry(
+      builder: (_) => Positioned(
+        bottom: 96,
+        left: 0,
+        right: 0,
+        child: IgnorePointer(
+          child: Material(
+            type: MaterialType.transparency,
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                decoration: BoxDecoration(
+                  color: Colors.black87,
+                  borderRadius: BorderRadius.circular(30),
+                ),
+                child: Text(
+                  msg,
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    overlay.insert(entry);
+    Future.delayed(const Duration(milliseconds: 1800), () {
+      try {
+        entry.remove();
+      } catch (_) {}
+    });
   }
 
   void _onKicked() {
@@ -94,34 +134,6 @@ class _RaviAppState extends State<RaviApp> with WidgetsBindingObserver {
               builder: (context, child) {
                 // Global text scale (settings > text size) + font fallbacks.
                 final mq = MediaQuery.of(context);
-                // v1.4.0 — پل toast سراسری برای دانلودهای مدیا (بدون context)
-                ToastBus.attach((msg) {
-                  final overlay = Overlay.of(RaviApp.navKey.currentContext!, rootOverlay: true);
-                  final entry = OverlayEntry(
-                    builder: (_) => Positioned(
-                      bottom: 96,
-                      left: 0,
-                      right: 0,
-                      child: IgnorePointer(
-                        child: Center(
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                            decoration: BoxDecoration(
-                              color: Colors.black87,
-                              borderRadius: BorderRadius.circular(30),
-                            ),
-                            child: Text(msg,
-                                style: const TextStyle(
-                                    color: Colors.white, fontSize: 13)),
-                          ),
-                        ),
-                      ),
-                    ),
-                  );
-                  overlay.insert(entry);
-                  Future.delayed(
-                      const Duration(milliseconds: 1800), () => entry.remove());
-                });
                 return ValueListenableBuilder<double>(
                   valueListenable: AppState.I.textScale,
                   builder: (context, scale, _) => MediaQuery(

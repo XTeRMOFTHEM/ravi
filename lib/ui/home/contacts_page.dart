@@ -123,7 +123,7 @@ class ContactsPage extends StatelessWidget {
                       imageUrl: url,
                       fit: BoxFit.cover,
                       memCacheWidth: 100,
-                      httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                      httpHeaders: ApiService.I.authHeadersFor(url),
                       errorWidget: (_, __, ___) => Center(
                         child: Text(u.peerUsername[0].toUpperCase(),
                             style: const TextStyle(

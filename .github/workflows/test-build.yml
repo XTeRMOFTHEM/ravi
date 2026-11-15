@@ -2,6 +2,8 @@ name: Test Build
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
 
@@ -11,18 +13,24 @@ concurrency:
 
 jobs:
   backend-check:
-    name: Backend syntax check
+    name: Backend compile & pytest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Compile-check app.py
-        run: python -m py_compile backend/app.py
+      - name: Install backend dependencies & pytest
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt pytest
+      - name: Compile-check Python sources
+        run: python -m py_compile backend/app.py backend/security.py backend/magazine.py backend/tests/test_ravi_backend.py
+      - name: Run backend test suite
+        run: pytest -v backend/tests/test_ravi_backend.py
 
   build-apk:
-    name: Build test APK
+    name: Analyze, unit-test & build debug APK
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,20 +51,24 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Point app at test backend
-        run: |
-          sed -i "s|const String kBaseUrl = '<your-backend-url>';|const String kBaseUrl = 'http://195.18.10.82:5000';|" lib/core/constants.dart
-          grep -n "kBaseUrl" lib/core/constants.dart
-
       - name: Pub get
         run: flutter pub get
 
       - name: Analyze
-        run: flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings
+        run: flutter analyze --no-pub --no-fatal-infos
+
+      - name: Run offline unit tests
+        run: flutter test test/identity_parser_test.dart test/client_logic_test.dart
 
       - name: Build debug APK
-        run: flutter build apk --debug --no-pub
-        continue-on-error: true
+        env:
+          RAVI_BASE_URL: ${{ vars.RAVI_TEST_BACKEND_URL }}
+        run: |
+          if [ -n "$RAVI_BASE_URL" ]; then
+            flutter build apk --debug --no-pub --dart-define="RAVI_BASE_URL=$RAVI_BASE_URL"
+          else
+            flutter build apk --debug --no-pub
+          fi
 
       - name: Locate built APK
         run: |

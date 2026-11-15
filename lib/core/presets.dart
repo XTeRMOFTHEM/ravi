@@ -34,6 +34,9 @@ class ProPresets {
     'radial-gradient(circle at 25% 20%, rgba(253,186,116,0.35) 0%, transparent 45%), linear-gradient(135deg, #fb923c 0%, #db2777 55%, #701a75 100%)': 'sunset',
     'radial-gradient(circle at 30% 15%, rgba(255,228,230,0.40) 0%, transparent 45%), linear-gradient(135deg, #fecdd3 0%, #fb7185 45%, #9d174d 100%)': 'rosegold',
     'radial-gradient(circle at 60% 15%, rgba(56,189,248,0.18) 0%, transparent 50%), linear-gradient(135deg, #18181b 0%, #09090b 60%, #000000 100%)': 'obsidian',
+    'radial-gradient(circle at 50% 15%, rgba(224,242,254,0.45) 0%, transparent 45%), linear-gradient(135deg, #e0f2fe 0%, #7dd3fc 50%, #38bdf8 100%)': 'icy',
+    'radial-gradient(circle at 30% 20%, rgba(253,224,71,0.40) 0%, transparent 45%), linear-gradient(135deg, #fde047 0%, #f97316 55%, #dc2626 100%)': 'fire',
+    'radial-gradient(circle at 50% 15%, rgba(34,211,238,0.35) 0%, transparent 50%), linear-gradient(135deg, #22d3ee 0%, #818cf8 55%, #f472b6 100%)': 'aurora',
   };
 
   static const List<(String, String)> avatarFrames = [
@@ -86,7 +89,7 @@ class ProPresets {
         'midnight' => fa ? 'نیمه‌شب' : 'Midnight',
         'sunset' => fa ? 'غروب' : 'Sunset',
         'rosegold' => fa ? 'رزگلد' : 'Rose gold',
-        'obsidian' => fa ? ' ابسیدین' : 'Obsidian',
+        'obsidian' => fa ? 'ابسیدین' : 'Obsidian',
         'icy' => fa ? 'یخی' : 'Icy',
         'fire' => fa ? 'آتش' : 'Fire',
         'aurora' => fa ? 'شفق' : 'Aurora',

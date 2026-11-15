@@ -321,7 +321,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen>
                         imageUrl: coverUrl,
                         fit: BoxFit.cover,
                         memCacheWidth: 480,
-                        httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                        httpHeaders: ApiService.I.authHeadersFor(coverUrl),
                         errorWidget: (_, __, ___) => const SizedBox.shrink(),
                       ),
                     ),
@@ -386,9 +386,9 @@ class _GroupInfoScreenState extends State<GroupInfoScreen>
                                   imageUrl: coverUrl,
                                   fit: BoxFit.cover,
                                   memCacheWidth: 240,
-                                  httpHeaders: {
-                                    'Cookie': ApiService.I.cookieHeader
-                                  },
+                                  httpHeaders: ApiService.I.authHeadersFor(
+                                    ApiService.I.avatarUrl(_info!.avatar),
+                                  ),
                                   errorWidget: (_, __, ___) => Center(
                                     child: Text(
                                       _info!.name.isEmpty
@@ -648,7 +648,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen>
                 imageUrl: url,
                 fit: BoxFit.cover,
                 memCacheWidth: 240,
-                httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                httpHeaders: ApiService.I.authHeadersFor(url),
                 errorWidget: (_, __, ___) =>
                     ColoredBox(color: p.bgSoft, child:
                         Icon(m.fileType == 'video'
@@ -788,7 +788,9 @@ class _GroupInfoScreenState extends State<GroupInfoScreen>
                         imageUrl: ApiService.I.avatarUrl(m.avatar),
                         fit: BoxFit.cover,
                         memCacheWidth: 96,
-                        httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                        httpHeaders: ApiService.I.authHeadersFor(
+                          ApiService.I.avatarUrl(m.avatar),
+                        ),
                         errorWidget: (_, __, ___) => Center(
                           child: Text(
                               m.username.isNotEmpty
@@ -918,7 +920,9 @@ class _GroupInfoScreenState extends State<GroupInfoScreen>
     final bioCtl = TextEditingController(text: _info!.bio);
     String? pickedPath;
     var busy = false;
-    final changed = await showModalBottomSheet<bool>(
+    bool? changed;
+    try {
+      changed = await showModalBottomSheet<bool>(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
@@ -982,9 +986,9 @@ class _GroupInfoScreenState extends State<GroupInfoScreen>
                                       ApiService.I.avatarUrl(_info!.avatar),
                                   fit: BoxFit.cover,
                                   memCacheWidth: 240,
-                                  httpHeaders: {
-                                    'Cookie': ApiService.I.cookieHeader
-                                  },
+                                  httpHeaders: ApiService.I.authHeadersFor(
+                                    ApiService.I.avatarUrl(_info!.avatar),
+                                  ),
                                 )
                               : Center(
                                   child: Text(
@@ -1105,6 +1109,10 @@ class _GroupInfoScreenState extends State<GroupInfoScreen>
         );
       }),
     );
+    } finally {
+      nameCtl.dispose();
+      bioCtl.dispose();
+    }
     if (changed == true && mounted) {
       showGlassToast(context, AppState.I.str.roomProfileSaved,
           icon: Icons.check_circle_outline_rounded,
@@ -1157,7 +1165,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen>
         imageUrl: url,
         fit: full ? BoxFit.cover : BoxFit.cover,
         memCacheWidth: full ? 720 : 300,
-        httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+        httpHeaders: ApiService.I.authHeadersFor(url),
       );
     }
     return Container(
@@ -1435,14 +1443,34 @@ class _MemberAdminSheet extends StatefulWidget {
 class _MemberAdminSheetState extends State<_MemberAdminSheet> {
   late final TextEditingController _title =
       TextEditingController(text: widget.existingTitle);
-  late final Map<String, bool> _perms = {
-    'change_info': true,
-    'delete_messages': true,
-    'ban_members': true,
-    'restrict_members': false,
-    'promote': false,
-  };
+  late final Map<String, bool> _perms = _initPerms();
   bool _busy = false;
+
+  Map<String, bool> _initPerms() {
+    final existing = widget.member.adminPerms;
+    if (widget.member.isRoomAdmin && existing.isNotEmpty) {
+      return {
+        'change_info': existing.contains('change_info'),
+        'delete_messages': existing.contains('delete_messages'),
+        'ban_members': existing.contains('ban_members'),
+        'restrict_members': existing.contains('restrict_members'),
+        'promote': existing.contains('promote'),
+      };
+    }
+    return {
+      'change_info': true,
+      'delete_messages': true,
+      'ban_members': true,
+      'restrict_members': false,
+      'promote': false,
+    };
+  }
+
+  @override
+  void dispose() {
+    _title.dispose();
+    super.dispose();
+  }
 
   Future<void> _save() async {
     if (_busy) return;
@@ -1532,7 +1560,9 @@ class _MemberAdminSheetState extends State<_MemberAdminSheet> {
                 backgroundImage: ApiService.I.avatarUrl(m.avatar).isNotEmpty
                     ? CachedNetworkImageProvider(
                         ApiService.I.avatarUrl(m.avatar),
-                        headers: {'Cookie': ApiService.I.cookieHeader})
+                        headers: ApiService.I.authHeadersFor(
+                          ApiService.I.avatarUrl(m.avatar),
+                        ))
                     : null,
                 child: ApiService.I.avatarUrl(m.avatar).isNotEmpty
                     ? null

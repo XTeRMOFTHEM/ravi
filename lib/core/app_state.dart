@@ -7,9 +7,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'account_manager.dart';
 import 'api_service.dart';
 import 'cache_service.dart';
+import 'chat_bg.dart';
 import 'constants.dart';
 import 'i18n.dart';
 import 'models.dart';
+import 'player_service.dart';
 import 'socket_service.dart';
 
 export 'models.dart' show kSnippetFa;
@@ -131,13 +133,20 @@ class AppState {
   /// [localOnly] keeps the server-side session untouched (used when the
   /// backend already told us the cookie is dead).
   Future<void> forceRelogin({bool localOnly = false}) async {
+    stopAutoRefresh();
+    unawaited(PlayerService.I.close());
     try {
-      if (!localOnly) await ApiService.I.logout();
-      else await ApiService.I.jar.clear();
+      if (!localOnly) {
+        await ApiService.I.logout();
+      } else {
+        await ApiService.I.jar.clear();
+      }
     } catch (_) {}
-    // Drop the (now anonymous) socket connection.
-    SocketService.I.configure(cookie: '');
+    // Drop the (now anonymous) socket connection + clear joined rooms & queue.
+    SocketService.I.resetSession();
+    archived.value = <ChatPreview>[];
     setChats(<ChatPreview>[]);
+    me.value = const RaviUser(id: 0, username: '', name: '');
     try {
       CacheService.I.put(CacheService.I.chatsKey(), <Map<String, dynamic>>[]);
     } catch (_) {}
@@ -150,9 +159,18 @@ class AppState {
     totalUnread.value = list.fold(0, (s, c) => s + c.unread);
   }
 
+  /// Scopes per-account client preferences (pinned chats, archived chats) so
+  /// switching accounts never leaks one account's pins/archive into another.
+  String _acctKey(String base) {
+    final u = ApiService.I.cachedUsername.toLowerCase().replaceAll(RegExp(r'[^a-z0-9_-]'), '_');
+    return u.isEmpty ? base : '$base.$u';
+  }
+
   // ---------- v1.0.9 archive ----------
   List<String> get _archivedKeys =>
-      prefs.getStringList('chats.archived') ?? <String>[];
+      prefs.getStringList(_acctKey('chats.archived')) ??
+      prefs.getStringList('chats.archived') ??
+      <String>[];
 
   bool isArchived(ChatPreview c) => _archivedKeys.contains(c.key);
 
@@ -163,8 +181,8 @@ class AppState {
     } else {
       keys.remove(c.key);
     }
-    await prefs.setStringList('chats.archived', keys);
-    _sortAndPublish(List<ChatPreview>.from(chats.value));
+    await prefs.setStringList(_acctKey('chats.archived'), keys);
+    _sortAndPublish(List<ChatPreview>.from([...chats.value, ...archived.value]));
   }
 
   void updatePvPreview(int chatId, String lastMessage, String lastTime, int unread, String otherUser,
@@ -299,7 +317,7 @@ class AppState {
   ///  • everything else sorted by last activity (newest first) so a new
   ///    message smoothly lifts its chat to the top
   void _sortAndPublish(List<ChatPreview> list) {
-    final pinnedSet = prefs.getStringList('chats.pinned') ?? const <String>[];
+    final pinnedSet = pinnedKeys;
     final archivedSet = _archivedKeys.toSet();
     ChatPreview global;
     final rest = <ChatPreview>[];
@@ -345,7 +363,10 @@ class AppState {
 
   static const maxPinned = 5;
 
-  List<String> get pinnedKeys => prefs.getStringList('chats.pinned') ?? <String>[];
+  List<String> get pinnedKeys =>
+      prefs.getStringList(_acctKey('chats.pinned')) ??
+      prefs.getStringList('chats.pinned') ??
+      <String>[];
 
   /// Returns null on success, 'limit' when 5 chats are already pinned.
   String? togglePin(ChatPreview chat) {
@@ -358,8 +379,8 @@ class AppState {
       if (chat.kind == ChatKind.general) return 'general';
       cur.add(k);
     }
-    prefs.setStringList('chats.pinned', cur);
-    _sortAndPublish(List<ChatPreview>.from(chats.value));
+    prefs.setStringList(_acctKey('chats.pinned'), cur);
+    _sortAndPublish(List<ChatPreview>.from([...chats.value, ...archived.value]));
     return null;
   }
 
@@ -381,9 +402,9 @@ class AppState {
     } catch (_) {}
     // forget pin/archive marks
     final pins = List<String>.from(pinnedKeys)..remove(chat.key);
-    await prefs.setStringList('chats.pinned', pins);
+    await prefs.setStringList(_acctKey('chats.pinned'), pins);
     final archKeys = List<String>.from(_archivedKeys)..remove(chat.key);
-    await prefs.setStringList('chats.archived', archKeys);
+    await prefs.setStringList(_acctKey('chats.archived'), archKeys);
     archived.value = arch;
     setChats(list);
   }
@@ -404,15 +425,21 @@ class AppState {
   Future<bool> switchAccount(int index) async {
     final acc = await AccountManager.I.switchTo(index);
     if (acc == null) return false;
+    // Clear old account's rooms/queue & stop any playing audio BEFORE switching cookies
+    unawaited(PlayerService.I.close());
+    SocketService.I.resetSession();
     await ApiService.I.jar.setRaw(acc.cookie);
     // هویت کش‌شده فوراً ست شود تا UI منتظر شبکه نمونه
     ApiService.I.applyIdentityDirect(username: acc.username, name: acc.name, avatar: acc.avatar, id: acc.id);
     refreshIdentity();
+    // Load per-account wallpaper & bubble color
+    await Future.wait([
+      ChatBgStore.I.load(),
+      BubbleColorStore.I.load(),
+    ]);
     // چت‌های قدیمی پاک شوند (مال حساب قبلی‌اند)
+    archived.value = <ChatPreview>[];
     setChats(<ChatPreview>[]);
-    try {
-      CacheService.I.put(CacheService.I.chatsKey(), <Map<String, dynamic>>[]);
-    } catch (_) {}
     // سوکت با کوکی نو دوباره وصل شود
     SocketService.I.configure(cookie: ApiService.I.cookieHeader);
     SocketService.I.connect();

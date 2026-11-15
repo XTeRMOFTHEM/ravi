@@ -1,17 +1,21 @@
 import 'dart:convert';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// v1.4.0 — مدیریت چندحسابی مثل تلگرام
-/// • کاربر معمولی: تا ۳ حساب همزمان
-/// • کاربر PRO (هر یک از حساب‌ها پرو باشد): تا ۵ حساب
-/// سوییچ بین حساب‌ها = جابجایی کوکی سشن + هویت، بدون خروج واقعی از سرور.
+/// Multi-account manager inspired by Telegram:
+/// • Standard accounts: up to 3 simultaneous accounts
+/// • PRO (if ANY stored account is Pro): up to 5 accounts
+/// • Session cookies are encrypted at rest using FlutterSecureStorage
+///   (Android Keystore / EncryptedSharedPreferences), automatically migrating
+///   any legacy plaintext SharedPreferences entries.
 class RaviAccount {
   final String username;
   final String name;
   final String avatar;
   final int id;
   final String cookie;
+  final bool isPro;
 
   const RaviAccount({
     required this.username,
@@ -19,10 +23,16 @@ class RaviAccount {
     required this.avatar,
     required this.id,
     required this.cookie,
+    this.isPro = false,
   });
 
   Map<String, dynamic> toJson() => {
-        'u': username, 'n': name, 'a': avatar, 'id': id, 'c': cookie,
+        'u': username,
+        'n': name,
+        'a': avatar,
+        'id': id,
+        'c': cookie,
+        'p': isPro,
       };
 
   static RaviAccount fromJson(Map<dynamic, dynamic> j) => RaviAccount(
@@ -31,6 +41,7 @@ class RaviAccount {
         avatar: '${j['a'] ?? ''}',
         id: j['id'] is int ? j['id'] as int : int.tryParse('${j['id']}') ?? 0,
         cookie: '${j['c'] ?? ''}',
+        isPro: j['p'] == true,
       );
 
   bool get isEmpty => username.isEmpty && cookie.isEmpty;
@@ -41,10 +52,11 @@ class AccountManager {
   static final AccountManager I = AccountManager._();
 
   static const _kAccounts = 'ravi.accounts.v1';
+  static const _secure = FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  );
 
-  /// همه‌ی حساب‌های ذخیره‌شده (به‌ترتیب افزودن)
   List<RaviAccount> _accounts = [];
-  /// ایندکس حساب فعال
   int _active = 0;
   bool _loaded = false;
 
@@ -52,9 +64,10 @@ class AccountManager {
   int get activeIndex => _active;
   bool get loaded => _loaded;
   bool get hasMultiple => _accounts.length > 1;
+  bool get hasAnyStoredPro => _accounts.any((a) => a.isPro);
 
-  /// سقف حساب‌ها: اگر «هر یک» از حساب‌های ذخیره‌شده پرو باشد ۵، وگرنه ۳
-  int maxAccounts({required bool anyPro}) => anyPro ? 5 : 3;
+  /// Max accounts: 5 when any stored/active account is Pro, otherwise 3.
+  int maxAccounts({required bool anyPro}) => (anyPro || hasAnyStoredPro) ? 5 : 3;
 
   RaviAccount? get active {
     if (_accounts.isEmpty) return null;
@@ -64,8 +77,24 @@ class AccountManager {
 
   Future<void> load() async {
     if (_loaded) return;
+    String? raw;
+    try {
+      raw = await _secure.read(key: _kAccounts);
+    } catch (_) {
+      raw = null;
+    }
     final p = await SharedPreferences.getInstance();
-    final raw = p.getString(_kAccounts);
+    // Migrate legacy plaintext storage to FlutterSecureStorage
+    if (raw == null || raw.isEmpty) {
+      final legacy = p.getString(_kAccounts);
+      if (legacy != null && legacy.isNotEmpty) {
+        raw = legacy;
+        try {
+          await _secure.write(key: _kAccounts, value: legacy);
+          await p.remove(_kAccounts);
+        } catch (_) {}
+      }
+    }
     try {
       if (raw != null && raw.isNotEmpty) {
         final list = (jsonDecode(raw) as List)
@@ -85,32 +114,43 @@ class AccountManager {
   }
 
   Future<void> _persist() async {
+    final encoded = jsonEncode(_accounts.map((a) => a.toJson()).toList());
     final p = await SharedPreferences.getInstance();
-    await p.setString(_kAccounts,
-        jsonEncode(_accounts.map((a) => a.toJson()).toList()));
+    try {
+      await _secure.write(key: _kAccounts, value: encoded);
+      await p.remove(_kAccounts);
+    } catch (_) {
+      // Fallback for headless widget tests without platform channels
+      await p.setString(_kAccounts, encoded);
+    }
     await p.setInt('$_kAccounts.idx', _active);
   }
 
-  /// آیا می‌شود حساب جدید اضافه کرد؟ (سقف: معمولی ۳ / پرو ۵)
-  /// [anyPro] یعنی کاربرِ لاگین‌شده فعلی پرو است (از پروفایلش خوانده می‌شود)
   bool canAddAccount({required bool anyPro}) {
     return _accounts.length < maxAccounts(anyPro: anyPro);
   }
 
-  /// افزودن/به‌روزرسانی حساب (مثلاً بعد از لاگین یا رفرش هویت).
-  /// اگر username از قبل بود، اطلاعات و کوکی‌اش تازه می‌شود و فعال می‌گردد.
-  /// (سقف تعداد در canAddAccount چک می‌شود — اینجا فقط ثبت می‌کنیم)
   Future<bool> upsertCurrent({
     required String username,
     required String name,
     required String avatar,
     required int id,
     required String cookie,
+    bool? isPro,
   }) async {
     await load();
     if (username.isEmpty || cookie.isEmpty) return false;
-    final acc = RaviAccount(username: username, name: name, avatar: avatar, id: id, cookie: cookie);
-    final idx = _accounts.indexWhere((a) => a.username.toLowerCase() == username.toLowerCase());
+    final idx = _accounts.indexWhere(
+        (a) => a.username.toLowerCase() == username.toLowerCase());
+    final prevPro = idx >= 0 ? _accounts[idx].isPro : false;
+    final acc = RaviAccount(
+      username: username,
+      name: name,
+      avatar: avatar,
+      id: id,
+      cookie: cookie,
+      isPro: isPro ?? prevPro,
+    );
     if (idx >= 0) {
       _accounts[idx] = acc;
       _active = idx;
@@ -122,7 +162,6 @@ class AccountManager {
     return true;
   }
 
-  /// سوییچ به حساب دیگر — کوکی و هویت برمی‌گردد تا ApiService آن را بلعاید
   Future<RaviAccount?> switchTo(int index) async {
     await load();
     if (index < 0 || index >= _accounts.length) return null;
@@ -131,7 +170,6 @@ class AccountManager {
     return _accounts[index];
   }
 
-  /// حذف یک حساب از لیست (فقط محلی؛ خروج سمت سرور جدا انجام می‌شود)
   Future<void> removeAt(int index) async {
     await load();
     if (index < 0 || index >= _accounts.length) return;
@@ -141,17 +179,30 @@ class AccountManager {
     await _persist();
   }
 
-  /// همگام‌سازی اطلاعات حساب فعال (اسم/آواتار جدید مثلاً)
+  Future<void> removeByUsername(String username) async {
+    await load();
+    final idx = _accounts.indexWhere(
+        (a) => a.username.toLowerCase() == username.toLowerCase());
+    if (idx >= 0) {
+      await removeAt(idx);
+    }
+  }
+
   Future<void> refreshActive({
     required String name,
     required String avatar,
+    bool? isPro,
   }) async {
     await load();
     if (_accounts.isEmpty) return;
     final a = _accounts[_active];
     _accounts[_active] = RaviAccount(
-      username: a.username, name: name.isNotEmpty ? name : a.username,
-      avatar: avatar.isNotEmpty ? avatar : a.avatar, id: a.id, cookie: a.cookie,
+      username: a.username,
+      name: name.isNotEmpty ? name : a.username,
+      avatar: avatar.isNotEmpty ? avatar : a.avatar,
+      id: a.id,
+      cookie: a.cookie,
+      isPro: isPro ?? a.isPro,
     );
     await _persist();
   }

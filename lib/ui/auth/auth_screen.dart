@@ -137,8 +137,10 @@ class _AuthScreenState extends State<AuthScreen> with TickerProviderStateMixin {
     SocketService.I.connect();
     await AppState.I.loadChatsCachedThenNetwork();
     if (!mounted) return;
-    Navigator.of(context, rootNavigator: true)
-        .pushReplacement(MaterialPageRoute(builder: (_) => const HomeShell()));
+    Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const HomeShell()),
+      (route) => false,
+    );
   }
 
   Future<void> _doLogin() async {
@@ -821,7 +823,9 @@ class _Segmented extends StatelessWidget {
           AnimatedAlign(
             duration: const Duration(milliseconds: 260),
             curve: Curves.easeOutCubic,
-            alignment: register ? Alignment.centerRight : Alignment.centerLeft,
+            alignment: register
+                ? AlignmentDirectional.centerEnd
+                : AlignmentDirectional.centerStart,
             child: FractionallySizedBox(
               widthFactor: .5,
               child: Container(

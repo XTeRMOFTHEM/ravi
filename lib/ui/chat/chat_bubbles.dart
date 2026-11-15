@@ -444,9 +444,10 @@ class MessageBubble extends StatelessWidget {
     if (_dimsProbed.contains(key)) return;
     _dimsProbed.add(key);
     try {
+      final absUrl = ApiService.I.absoluteUrl(url);
       final provider = CachedNetworkImageProvider(
-          ApiService.I.absoluteUrl(url),
-          headers: {'Cookie': ApiService.I.cookieHeader});
+          absUrl,
+          headers: ApiService.I.authHeadersFor(absUrl));
       final stream =
           provider.resolve(const ImageConfiguration(size: Size(1, 1)));
       late final ImageStreamListener listener;
@@ -785,7 +786,7 @@ class MessageBubble extends StatelessWidget {
               fit: BoxFit.cover, gaplessPlayback: true),
           Image(
             image: CachedNetworkImageProvider(url,
-                headers: {'Cookie': ApiService.I.cookieHeader}),
+                headers: ApiService.I.authHeadersFor(url)),
             fit: BoxFit.cover,
             gaplessPlayback: true,
             frameBuilder: (c, child, frame, _) =>
@@ -1025,11 +1026,13 @@ class _VideoThumbTileState extends State<VideoThumbTile> {
   /// incompatible with AGP 9 and was dropped).
   Future<void> _grab() async {
     try {
+      final authHdrs = ApiService.I.authHeadersFor(widget.src);
       final b = await _ch.invokeMethod<Uint8List>('getFrame', {
         'path': widget.src,
         'isUrl': !widget.isLocal,
         'maxWidth': 480,
-        'cookie': ApiService.I.cookieHeader,
+        'cookie': authHdrs['Cookie'] ?? '',
+        'allowedHost': ApiService.I.baseHost,
       });
       if (b != null && mounted) {
         _cache[widget.src] = b;
@@ -1114,7 +1117,7 @@ class _SenderAvatar extends StatelessWidget {
                 imageUrl: url,
                 fit: BoxFit.cover,
                 memCacheWidth: 64,
-                httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                httpHeaders: ApiService.I.authHeadersFor(url),
                 errorWidget: (_, __, ___) => Center(
                   child: Text(
                     msg.username.isEmpty
@@ -1641,7 +1644,7 @@ class _AlbumBubble extends StatelessWidget {
                     Image(
                       image: CachedNetworkImageProvider(
                           ApiService.I.absoluteUrl(m.fileUrl),
-                          headers: {'Cookie': ApiService.I.cookieHeader}),
+                          headers: ApiService.I.authHeadersFor(m.fileUrl)),
                       fit: BoxFit.cover,
                       gaplessPlayback: true,
                       frameBuilder: (c, child, frame, _) => frame == null

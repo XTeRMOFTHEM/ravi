@@ -93,7 +93,8 @@ class FrameAvatar extends StatelessWidget {
                 imageUrl: ApiService.I.avatarUrl(avatarPath),
                 fit: BoxFit.cover,
                 memCacheWidth: (size * 2).toInt(),
-                httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                httpHeaders: ApiService.I.authHeadersFor(
+                    ApiService.I.avatarUrl(avatarPath)),
                 errorWidget: (_, __, ___) => _letter(),
               )
             : _letter(),
@@ -116,7 +117,7 @@ class FrameAvatar extends StatelessWidget {
           imageUrl: frame,
           fit: BoxFit.contain,
           memCacheWidth: (frameSize * 1.4).toInt(),
-          httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+          httpHeaders: ApiService.I.authHeadersFor(frame),
           fadeInDuration: const Duration(milliseconds: 160),
           errorWidget: (_, __, ___) => const SizedBox.shrink(),
         ),

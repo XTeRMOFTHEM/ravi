@@ -2,29 +2,75 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
-import 'storage_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'account_manager.dart';
 import 'constants.dart';
 import 'identity_parser.dart';
 import 'models.dart';
+import 'socket_service.dart';
+import 'storage_service.dart';
 
-/// Persistent cookie jar — keeps the Flask session cookie across app restarts,
-/// exactly like a browser session in the web version.
+/// Persistent encrypted cookie jar — keeps the Flask session cookie across app
+/// restarts in Android Keystore / EncryptedSharedPreferences via
+/// FlutterSecureStorage, migrating any legacy plaintext SharedPreferences entry.
 class CookieJar {
   static const _kKey = 'ravi.session.cookie';
+  static const _secure = FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  );
   String _cookie = '';
 
   String get header => _cookie;
 
   Future<void> load() async {
+    String? val;
+    try {
+      val = await _secure.read(key: _kKey);
+    } catch (_) {
+      val = null;
+    }
+    if (val != null && val.isNotEmpty) {
+      _cookie = val;
+      return;
+    }
+    // Migrate legacy plaintext SharedPreferences cookie
     try {
       final p = await SharedPreferences.getInstance();
-      _cookie = p.getString(_kKey) ?? '';
+      final legacy = p.getString(_kKey) ?? '';
+      _cookie = legacy;
+      if (legacy.isNotEmpty) {
+        try {
+          await _secure.write(key: _kKey, value: legacy);
+          await p.remove(_kKey);
+        } catch (_) {}
+      }
     } catch (_) {}
+  }
+
+  Future<void> _saveCookie() async {
+    try {
+      if (_cookie.isEmpty) {
+        await _secure.delete(key: _kKey);
+      } else {
+        await _secure.write(key: _kKey, value: _cookie);
+      }
+      final p = await SharedPreferences.getInstance();
+      await p.remove(_kKey);
+    } catch (_) {
+      // Fallback for headless test environments without platform channels
+      try {
+        final p = await SharedPreferences.getInstance();
+        if (_cookie.isEmpty) {
+          await p.remove(_kKey);
+        } else {
+          await p.setString(_kKey, _cookie);
+        }
+      } catch (_) {}
+    }
   }
 
   void absorb(HttpClientResponse? resp) {
@@ -53,31 +99,18 @@ class CookieJar {
       }
     }
     _cookie = map.entries.map((e) => '${e.key}=${e.value}').join('; ');
-    try {
-      final p = await SharedPreferences.getInstance();
-      await p.setString(_kKey, _cookie);
-    } catch (_) {}
+    await _saveCookie();
   }
 
   Future<void> clear() async {
     _cookie = '';
-    try {
-      final p = await SharedPreferences.getInstance();
-      await p.remove(_kKey);
-    } catch (_) {}
+    await _saveCookie();
   }
 
   /// v1.4.0 — چندحسابی: ست کردن مستقیم کوکی یک حساب ذخیره‌شده (سوییچ حساب)
   Future<void> setRaw(String cookieHeader) async {
     _cookie = cookieHeader.trim();
-    try {
-      final p = await SharedPreferences.getInstance();
-      if (_cookie.isEmpty) {
-        await p.remove(_kKey);
-      } else {
-        await p.setString(_kKey, _cookie);
-      }
-    } catch (_) {}
+    await _saveCookie();
   }
 }
 
@@ -219,9 +252,28 @@ class ApiService {
     return resp;
   }
 
-  /// GET the index page with the (fresh) session cookie and parse
-  /// CURRENT_USER. Returns true when the identity is now known.
+  /// Fetch authenticated user identity via JSON `/api/me` first, falling back
+  /// to HTML index parsing for older servers.
   Future<bool> _fetchIdentityWithSession() async {
+    try {
+      final rMe = await _client
+          .get(Uri.parse('$kBaseUrl/api/me'), headers: _headers)
+          .timeout(const Duration(seconds: 15));
+      _absorb(rMe);
+      if (rMe.statusCode == 200 && _isJsonBody(rMe)) {
+        final j = jsonDecode(utf8.decode(rMe.bodyBytes));
+        if (j is Map && '${j['username'] ?? ''}'.isNotEmpty) {
+          _cachedUserId = j['id'] is int ? j['id'] as int : int.tryParse('${j['id']}') ?? 0;
+          _cachedUsername = '${j['username'] ?? ''}';
+          _cachedAvatar = '${j['avatar'] ?? ''}';
+          final dn = '${j['name'] ?? ''}'.trim();
+          _cachedName = dn.isNotEmpty ? dn : _cachedUsername;
+          _cachedChatBg = '${j['chat_bg'] ?? ''}';
+          await _persistIdentity();
+          return true;
+        }
+      }
+    } catch (_) {}
     final r = await _client
         .get(Uri.parse('$kBaseUrl/'), headers: _headers)
         .timeout(const Duration(seconds: 20));
@@ -229,6 +281,17 @@ class ApiService {
     if (r.statusCode != 200) return false;
     return _applyIdentity(utf8.decode(r.bodyBytes, allowMalformed: true));
   }
+
+  /// True when a 3xx redirect points to the login screen (session expired).
+  bool _isLoginRedirect(http.Response r) {
+    if (r.statusCode < 300 || r.statusCode >= 400) return false;
+    final loc = (r.headers['location'] ?? '').toLowerCase();
+    return loc.contains('/login');
+  }
+
+  /// True when a non-redirect response is an ok 3xx that does NOT bounce to /login.
+  bool _isSafeRedirect(http.Response r) =>
+      r.statusCode >= 300 && r.statusCode < 400 && !_isLoginRedirect(r);
 
   bool _applyIdentity(String html) {
     final m = parseCurrentUser(html);
@@ -529,16 +592,24 @@ class ApiService {
           .get(Uri.parse('$kBaseUrl/api/start_pv/$username'), headers: _headers)
           .timeout(const Duration(seconds: 12));
       _absorb(r);
-      if (r.statusCode == 200) {
+      if (_isJsonBody(r)) {
         final j = jsonDecode(utf8.decode(r.bodyBytes));
-        if (j is Map && j['chat_id'] != null) {
-          return ApiResult(ApiStatus.ok, data: (j['chat_id'] is int) ? j['chat_id'] as int : int.tryParse('${j['chat_id']}') ?? 0);
+        if (r.statusCode == 200 && j is Map && j['chat_id'] != null) {
+          return ApiResult(
+            ApiStatus.ok,
+            data: (j['chat_id'] is int)
+                ? j['chat_id'] as int
+                : int.tryParse('${j['chat_id']}') ?? 0,
+          );
         }
         if (j is Map && j['error'] != null) {
           return ApiResult(ApiStatus.error, message: '${j['error']}');
         }
       }
-      return ApiResult(ApiStatus.error, message: 'not_found');
+      if (r.statusCode == 401 || _isLoginRedirect(r)) {
+        return const ApiResult(ApiStatus.unauthorized);
+      }
+      return const ApiResult(ApiStatus.error, message: 'not_found');
     } catch (e) {
       return ApiResult(ApiStatus.networkError, message: '$e');
     }
@@ -552,8 +623,16 @@ class ApiService {
       final streamed = await _client.send(req).timeout(const Duration(seconds: 15));
       final resp = await http.Response.fromStream(streamed);
       _absorb(resp);
-      if (resp.statusCode == 200 || resp.statusCode == 302) {
+      if (resp.statusCode == 200 && _isJsonBody(resp)) {
+        final j = jsonDecode(utf8.decode(resp.bodyBytes));
+        if (j is Map<String, dynamic>) return ApiResult(ApiStatus.ok, data: j);
         return const ApiResult(ApiStatus.ok, data: {});
+      }
+      if (_isSafeRedirect(resp)) {
+        return const ApiResult(ApiStatus.ok, data: {});
+      }
+      if (_isLoginRedirect(resp) || resp.statusCode == 401) {
+        return const ApiResult(ApiStatus.unauthorized);
       }
       return const ApiResult(ApiStatus.error, message: 'fail');
     } catch (e) {
@@ -700,6 +779,32 @@ class ApiService {
   }
 
   String get cookieHeader => jar.header;
+
+  /// Host of the configured RAVI backend (used to prevent leaking session
+  /// cookies to external URLs on image/video/audio fetches).
+  String get baseHost => Uri.tryParse(kBaseUrl)?.host.toLowerCase() ?? '';
+
+  /// Returns `{'Cookie': jar.header}` ONLY when [urlOrPath] resolves to the
+  /// configured RAVI backend origin. External URLs receive empty headers so
+  /// an attacker-supplied `file_url` can never exfiltrate the user's cookie.
+  Map<String, String> authHeadersFor(String urlOrPath) {
+    final c = jar.header;
+    if (c.isEmpty) return const {};
+    final raw = urlOrPath.trim();
+    if (raw.isEmpty) return const {};
+    if (raw.startsWith('/') && !raw.startsWith('//')) return {'Cookie': c};
+    final u = Uri.tryParse(raw);
+    final b = Uri.tryParse(kBaseUrl);
+    if (u == null || b == null || b.host.isEmpty) return const {};
+    if (u.hasScheme &&
+        u.host.toLowerCase() == b.host.toLowerCase() &&
+        u.scheme.toLowerCase() == b.scheme.toLowerCase() &&
+        u.port == b.port) {
+      return {'Cookie': c};
+    }
+    return const {};
+  }
+
   void setIdentity({required String username, int id = 0, String avatar = '', String name = ''}) {
     if (username.isNotEmpty) _cachedUsername = username;
     if (id > 0) _cachedUserId = id;
@@ -709,14 +814,29 @@ class ApiService {
   }
 
   Future<void> logout() async {
+    // Capture current auth headers & username BEFORE clearing local state so
+    // the server actually invalidates the session token!
+    final logoutHeaders = Map<String, String>.from(_headers);
+    final oldUsername = _cachedUsername;
+    if (jar.header.isNotEmpty) {
+      try {
+        await _client
+            .post(Uri.parse('$kBaseUrl/logout'), headers: logoutHeaders)
+            .timeout(const Duration(seconds: 8));
+      } catch (_) {}
+    }
     await jar.clear();
     _cachedUsername = '';
     _cachedUserId = 0;
     _cachedAvatar = '';
     _cachedName = '';
-    // v1.4.0 — حساب از لیست چندحسابی هم حذف شود
+    // Remove only the logged-out account from the local switcher
     try {
-      await AccountManager.I.removeAt(AccountManager.I.activeIndex);
+      if (oldUsername.isNotEmpty) {
+        await AccountManager.I.removeByUsername(oldUsername);
+      } else {
+        await AccountManager.I.removeAt(AccountManager.I.activeIndex);
+      }
     } catch (_) {}
     try {
       final p = await SharedPreferences.getInstance();
@@ -724,9 +844,6 @@ class ApiService {
       await p.remove(_kUserIdKey);
       await p.remove(_kAvatarKey);
       await p.remove(_kNameKey);
-    } catch (_) {}
-    try {
-      await _client.get(Uri.parse('$kBaseUrl/logout'), headers: _headers).timeout(const Duration(seconds: 8));
     } catch (_) {}
   }
 
@@ -740,7 +857,8 @@ class ApiService {
       final url = urlOrPath.startsWith('http')
           ? urlOrPath
           : absoluteUrl(urlOrPath);
-      final req = http.Request('GET', Uri.parse(url))..headers.addAll(_headers);
+      final req = http.Request('GET', Uri.parse(url))
+        ..headers.addAll(authHeadersFor(url));
       final resp = await _client.send(req).timeout(const Duration(seconds: 30));
       if (resp.statusCode != 200) return false;
       final total = resp.contentLength ?? 0;
@@ -1053,17 +1171,20 @@ class ApiService {
     }
   }
 
-  /// GET /block_user/<username> (server 302s back; any 2xx/3xx counts).
+  /// POST /block_user/<username> (JSON XHR or safe redirect).
   Future<ApiResult<bool>> blockUser(String username) async {
     try {
-      final req = http.Request('GET', Uri.parse('$kBaseUrl/block_user/$username'))
+      final req = http.Request('POST', Uri.parse('$kBaseUrl/block_user/$username'))
         ..followRedirects = false
         ..headers.addAll(_headers);
       final streamed = await _client.send(req).timeout(const Duration(seconds: 12));
       final r = await http.Response.fromStream(streamed);
       _absorb(r);
-      if (r.statusCode >= 200 && r.statusCode < 400) {
+      if (r.statusCode == 200 || _isSafeRedirect(r)) {
         return const ApiResult(ApiStatus.ok, data: true);
+      }
+      if (_isLoginRedirect(r) || r.statusCode == 401) {
+        return const ApiResult(ApiStatus.unauthorized);
       }
       return const ApiResult(ApiStatus.error);
     } catch (e) {
@@ -1231,12 +1352,15 @@ class ApiService {
     }
   }
 
-  /// Pro customization saves. All of these redirect (302) on success and
-  /// redirect with a flash error when not Pro — so 302 == applied.
+  /// Pro customization saves. Rejects /login redirects instead of falsely
+  /// reporting success.
   Future<ApiResult<bool>> _postProForm(String path, Map<String, String> fields) async {
     try {
       final resp = await _postForm(path, fields);
-      if (resp.statusCode >= 300 && resp.statusCode < 400) {
+      if (_isLoginRedirect(resp) || resp.statusCode == 401) {
+        return const ApiResult(ApiStatus.unauthorized);
+      }
+      if (_isSafeRedirect(resp)) {
         return const ApiResult(ApiStatus.ok, data: true);
       }
       // 200 = re-rendered page (not Pro / invalid key).
@@ -1294,8 +1418,10 @@ class ApiService {
   Future<ApiResult<bool>> leaveRoom(String roomId) async {
     try {
       final resp = await _postForm('/room/$roomId/leave', {});
-      if (resp.statusCode >= 300 && resp.statusCode < 400) {
-        // legacy redirect-based success
+      if (_isLoginRedirect(resp) || resp.statusCode == 401) {
+        return const ApiResult(ApiStatus.unauthorized);
+      }
+      if (_isSafeRedirect(resp)) {
         return const ApiResult(ApiStatus.ok, data: true);
       }
       final body = utf8.decode(resp.bodyBytes, allowMalformed: true);
@@ -1340,7 +1466,10 @@ class ApiService {
       final resp = await _postForm('/room/$roomId/ban', {
         'user_id': '$userId',
       });
-      if (resp.statusCode >= 300 && resp.statusCode < 400) {
+      if (_isLoginRedirect(resp) || resp.statusCode == 401) {
+        return const ApiResult(ApiStatus.unauthorized);
+      }
+      if (_isSafeRedirect(resp)) {
         return const ApiResult(ApiStatus.ok, data: true);
       }
       final body = utf8.decode(resp.bodyBytes, allowMalformed: true);
@@ -1365,7 +1494,10 @@ class ApiService {
       final resp = await _postForm('/room/$roomId/unban', {
         'user_id': '$userId',
       });
-      if (resp.statusCode >= 300 && resp.statusCode < 400) {
+      if (_isLoginRedirect(resp) || resp.statusCode == 401) {
+        return const ApiResult(ApiStatus.unauthorized);
+      }
+      if (_isSafeRedirect(resp)) {
         return const ApiResult(ApiStatus.ok, data: true);
       }
       final body = utf8.decode(resp.bodyBytes, allowMalformed: true);
@@ -1390,7 +1522,10 @@ class ApiService {
   Future<ApiResult<bool>> _postRoomManager(String path, int userId) async {
     try {
       final resp = await _postForm(path, {'user_id': '$userId'});
-      if (resp.statusCode >= 300 && resp.statusCode < 400) {
+      if (_isLoginRedirect(resp) || resp.statusCode == 401) {
+        return const ApiResult(ApiStatus.unauthorized);
+      }
+      if (_isSafeRedirect(resp)) {
         return const ApiResult(ApiStatus.ok, data: true);
       }
       final body = utf8.decode(resp.bodyBytes, allowMalformed: true);
@@ -1418,7 +1553,10 @@ class ApiService {
       final streamed = await _client.send(req).timeout(const Duration(seconds: 60));
       final resp = await http.Response.fromStream(streamed);
       _absorb(resp);
-      if (resp.statusCode >= 300 && resp.statusCode < 400) {
+      if (_isLoginRedirect(resp) || resp.statusCode == 401) {
+        return const ApiResult(ApiStatus.unauthorized);
+      }
+      if (_isSafeRedirect(resp)) {
         return const ApiResult(ApiStatus.ok, data: true);
       }
       final body = utf8.decode(resp.bodyBytes, allowMalformed: true);
@@ -1570,10 +1708,13 @@ class ApiService {
   Future<ApiResult<bool>> joinRoom(String roomId) async {
     try {
       final resp = await _postForm('/join_private_room', {'room_id': roomId});
+      if (_isLoginRedirect(resp) || resp.statusCode == 401) {
+        return const ApiResult(ApiStatus.unauthorized);
+      }
       final body = utf8.decode(resp.bodyBytes, allowMalformed: true);
       final ok = (resp.statusCode == 200 && body.trimLeft().startsWith('{') &&
               body.contains('success')) ||
-          (resp.statusCode >= 300 && resp.statusCode < 400);
+          _isSafeRedirect(resp);
       return ApiResult(ok ? ApiStatus.ok : ApiStatus.error, data: ok);
     } catch (e) {
       return ApiResult(ApiStatus.networkError, message: '$e');
@@ -1686,8 +1827,16 @@ class ApiService {
       '/api/sessions/revoke', {'sid': sid});
 
   /// POST /api/sessions/revoke_all — {keep_sid}
-  Future<ApiResult<bool>> revokeAllSessions(String keepSid) =>
-      _postJsonBool('/api/sessions/revoke_all', {'keep_sid': keepSid});
+  /// Also re-configures SocketService when the server rotates the session cookie.
+  Future<ApiResult<bool>> revokeAllSessions(String keepSid) async {
+    final before = jar.header;
+    final res = await _postJsonBool('/api/sessions/revoke_all', {'keep_sid': keepSid});
+    if (res.ok && jar.header.isNotEmpty && jar.header != before) {
+      SocketService.I.configure(cookie: jar.header);
+      SocketService.I.connect();
+    }
+    return res;
+  }
 
   /// POST /room/<id>/set_slowmode — {seconds}
   Future<ApiResult<Map<String, dynamic>>> setSlowMode(
@@ -1795,22 +1944,231 @@ class ApiService {
     }
   }
 
-  /// POST /report_user/<username> — AJAX header → JSON success.
-  Future<ApiResult<bool>> reportUser(String username) async {
+  /// POST /report_user/<username> — persists user report & optional reason.
+  Future<ApiResult<bool>> reportUser(String username, {String reason = ''}) async {
     try {
       final r = await _client
-          .get(Uri.parse('$kBaseUrl/report_user/$username'),
-              headers: {..._headers, 'X-Requested-With': 'XMLHttpRequest'})
+          .post(
+            Uri.parse('$kBaseUrl/report_user/$username'),
+            headers: {
+              ..._headers,
+              'X-Requested-With': 'XMLHttpRequest',
+              'Content-Type': 'application/json; charset=utf-8',
+            },
+            body: jsonEncode({'reason': reason.trim()}),
+          )
           .timeout(const Duration(seconds: 12));
       _absorb(r);
       if (r.statusCode == 200 && _isJsonBody(r)) {
         final j = jsonDecode(utf8.decode(r.bodyBytes));
-        return ApiResult(j is Map && j['success'] == true
-            ? ApiStatus.ok
-            : ApiStatus.error,
-            data: j is Map && j['success'] == true);
+        return ApiResult(
+          j is Map && j['success'] == true ? ApiStatus.ok : ApiStatus.error,
+          data: j is Map && j['success'] == true,
+          message: j is Map ? '${j['error'] ?? ''}' : null,
+        );
       }
       return const ApiResult(ApiStatus.error);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, message: '$e');
+    }
+  }
+
+  // ==================== Real Magazine & Profile Posts API ====================
+
+  Future<ApiResult<List<MagazinePost>>> magazinePosts({String query = '', int limit = 40, int offset = 0}) async {
+    try {
+      final q = query.trim();
+      final uri = Uri.parse(
+        '$kBaseUrl/api/magazine/posts?limit=$limit&offset=$offset'
+        '${q.isNotEmpty ? '&q=${Uri.encodeQueryComponent(q)}' : ''}',
+      );
+      final r = await _client.get(uri, headers: _headers).timeout(const Duration(seconds: 12));
+      _absorb(r);
+      if (r.statusCode == 200 && _isJsonBody(r)) {
+        final j = jsonDecode(utf8.decode(r.bodyBytes));
+        final list = ((j is Map ? j['posts'] : null) as List? ?? const [])
+            .whereType<Map>()
+            .map((e) => MagazinePost.fromJson(Map<String, dynamic>.from(e)))
+            .toList();
+        return ApiResult(ApiStatus.ok, data: list);
+      }
+      if (r.statusCode == 401 || _isLoginRedirect(r)) {
+        return const ApiResult(ApiStatus.unauthorized);
+      }
+      return const ApiResult(ApiStatus.error);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, message: '$e');
+    }
+  }
+
+  Future<ApiResult<List<MagazinePost>>> userPosts(String username, {int limit = 40}) async {
+    try {
+      final uri = Uri.parse('$kBaseUrl/api/users/${Uri.encodeComponent(username)}/posts?limit=$limit');
+      final r = await _client.get(uri, headers: _headers).timeout(const Duration(seconds: 12));
+      _absorb(r);
+      if (r.statusCode == 200 && _isJsonBody(r)) {
+        final j = jsonDecode(utf8.decode(r.bodyBytes));
+        final list = ((j is Map ? j['posts'] : null) as List? ?? const [])
+            .whereType<Map>()
+            .map((e) => MagazinePost.fromJson(Map<String, dynamic>.from(e)))
+            .toList();
+        return ApiResult(ApiStatus.ok, data: list);
+      }
+      return const ApiResult(ApiStatus.error);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, message: '$e');
+    }
+  }
+
+  Future<ApiResult<MagazinePost>> createMagazinePost({
+    required String content,
+    String channel = '',
+    String mediaUrl = '',
+    String category = 'general',
+  }) async {
+    try {
+      final r = await _client
+          .post(
+            Uri.parse('$kBaseUrl/api/magazine/posts'),
+            headers: {
+              ..._headers,
+              'Content-Type': 'application/json; charset=utf-8',
+            },
+            body: jsonEncode({
+              'content': content.trim(),
+              'channel': channel.trim(),
+              'media_url': mediaUrl.trim(),
+              'category': category,
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+      _absorb(r);
+      if ((r.statusCode == 200 || r.statusCode == 201) && _isJsonBody(r)) {
+        final j = jsonDecode(utf8.decode(r.bodyBytes));
+        if (j is Map && j['post'] is Map) {
+          return ApiResult(
+            ApiStatus.ok,
+            data: MagazinePost.fromJson(Map<String, dynamic>.from(j['post'])),
+          );
+        }
+      }
+      return const ApiResult(ApiStatus.error);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, message: '$e');
+    }
+  }
+
+  Future<ApiResult<bool>> deleteMagazinePost(int postId) async {
+    try {
+      final r = await _client
+          .delete(Uri.parse('$kBaseUrl/api/magazine/posts/$postId'), headers: _headers)
+          .timeout(const Duration(seconds: 12));
+      _absorb(r);
+      if (r.statusCode == 200 && _isJsonBody(r)) {
+        final j = jsonDecode(utf8.decode(r.bodyBytes));
+        return ApiResult(
+          j is Map && j['success'] == true ? ApiStatus.ok : ApiStatus.error,
+          data: j is Map && j['success'] == true,
+        );
+      }
+      return const ApiResult(ApiStatus.error);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, message: '$e');
+    }
+  }
+
+  Future<ApiResult<Map<String, dynamic>>> toggleMagazineLike(int postId) async {
+    try {
+      final r = await _client
+          .post(Uri.parse('$kBaseUrl/api/magazine/posts/$postId/like'), headers: _headers)
+          .timeout(const Duration(seconds: 10));
+      _absorb(r);
+      if (r.statusCode == 200 && _isJsonBody(r)) {
+        final j = jsonDecode(utf8.decode(r.bodyBytes));
+        if (j is Map && j['success'] == true) {
+          return ApiResult(ApiStatus.ok, data: Map<String, dynamic>.from(j));
+        }
+      }
+      return const ApiResult(ApiStatus.error);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, message: '$e');
+    }
+  }
+
+  Future<ApiResult<List<MagazineReply>>> magazineReplies(int postId) async {
+    try {
+      final r = await _client
+          .get(Uri.parse('$kBaseUrl/api/magazine/posts/$postId/replies'), headers: _headers)
+          .timeout(const Duration(seconds: 10));
+      _absorb(r);
+      if (r.statusCode == 200 && _isJsonBody(r)) {
+        final j = jsonDecode(utf8.decode(r.bodyBytes));
+        final list = ((j is Map ? j['replies'] : null) as List? ?? const [])
+            .whereType<Map>()
+            .map((e) => MagazineReply.fromJson(Map<String, dynamic>.from(e)))
+            .toList();
+        return ApiResult(ApiStatus.ok, data: list);
+      }
+      return const ApiResult(ApiStatus.error);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, message: '$e');
+    }
+  }
+
+  Future<ApiResult<MagazineReply>> addMagazineReply(int postId, String content) async {
+    try {
+      final r = await _client
+          .post(
+            Uri.parse('$kBaseUrl/api/magazine/posts/$postId/replies'),
+            headers: {
+              ..._headers,
+              'Content-Type': 'application/json; charset=utf-8',
+            },
+            body: jsonEncode({'content': content.trim()}),
+          )
+          .timeout(const Duration(seconds: 12));
+      _absorb(r);
+      if ((r.statusCode == 200 || r.statusCode == 201) && _isJsonBody(r)) {
+        final j = jsonDecode(utf8.decode(r.bodyBytes));
+        if (j is Map && j['reply'] is Map) {
+          return ApiResult(
+            ApiStatus.ok,
+            data: MagazineReply.fromJson(Map<String, dynamic>.from(j['reply'])),
+          );
+        }
+      }
+      return const ApiResult(ApiStatus.error);
+    } catch (e) {
+      return ApiResult(ApiStatus.networkError, message: '$e');
+    }
+  }
+
+  // ==================== Real RAVI AI Chat API ====================
+
+  Future<ApiResult<String>> aiChat(String message, {bool pro = false}) async {
+    try {
+      final path = pro ? '/api/ai_pro_chat' : '/api/ai_chat';
+      final r = await _client
+          .post(
+            Uri.parse('$kBaseUrl$path'),
+            headers: {
+              ..._headers,
+              'Content-Type': 'application/json; charset=utf-8',
+            },
+            body: jsonEncode({'message': message.trim()}),
+          )
+          .timeout(const Duration(seconds: 25));
+      _absorb(r);
+      if (_isJsonBody(r)) {
+        final j = jsonDecode(utf8.decode(r.bodyBytes));
+        if (r.statusCode == 200 && j is Map && j['reply'] != null) {
+          return ApiResult(ApiStatus.ok, data: '${j['reply']}');
+        }
+        if (j is Map && j['error'] != null) {
+          return ApiResult(ApiStatus.error, message: '${j['error']}');
+        }
+      }
+      return const ApiResult(ApiStatus.error, message: 'fail');
     } catch (e) {
       return ApiResult(ApiStatus.networkError, message: '$e');
     }
@@ -1864,7 +2222,7 @@ class ApiService {
           .timeout(const Duration(seconds: 10));
       _absorb(r);
       if (r.statusCode == 200 && _isJsonBody(r)) {
-        return ApiResult(ApiStatus.ok, data: _pinsFromJson(r.body));
+        return ApiResult(ApiStatus.ok, data: _pinsFromJson(utf8.decode(r.bodyBytes)));
       }
       return const ApiResult(ApiStatus.error, data: []);
     } catch (e) {
@@ -1907,7 +2265,7 @@ class ApiService {
           .timeout(const Duration(seconds: 10));
       _absorb(r);
       if (r.statusCode == 200 && _isJsonBody(r)) {
-        return ApiResult(ApiStatus.ok, data: _pinsFromJson(r.body));
+        return ApiResult(ApiStatus.ok, data: _pinsFromJson(utf8.decode(r.bodyBytes)));
       }
       return const ApiResult(ApiStatus.error, data: []);
     } catch (e) {

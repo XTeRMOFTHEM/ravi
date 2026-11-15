@@ -12,7 +12,9 @@ import '../../core/i18n.dart';
 import '../../core/models.dart';
 import '../chat/photo_viewer.dart';
 import '../widgets/common.dart';
+import '../widgets/ravi_alerts.dart';
 import 'accounts_sheet.dart';
+import 'magazine_page.dart';
 import 'settings_page.dart';
 import 'user_profile_screen.dart';
 
@@ -35,8 +37,9 @@ class _ProfilePageState extends State<ProfilePage>
   @override
   bool get wantKeepAlive => true;
 
-  late final TabController _tabs = TabController(length: 3, vsync: this);
+  late final TabController _tabs = TabController(length: 2, vsync: this);
   Map<String, dynamic>? _prof;
+  List<MagazinePost> _posts = [];
   bool _loading = true;
   int _avatarBust = 0;
 
@@ -64,12 +67,47 @@ class _ProfilePageState extends State<ProfilePage>
       if (mounted) setState(() => _loading = false);
       return;
     }
-    final r = await ApiService.I.userProfile(me);
+    final results = await Future.wait([
+      ApiService.I.userProfile(me),
+      ApiService.I.userPosts(me),
+    ]);
     if (!mounted) return;
+    final rProf = results[0] as ApiResult<Map<String, dynamic>>;
+    final rPosts = results[1] as ApiResult<List<MagazinePost>>;
     setState(() {
-      _prof = r.ok ? r.data : null;
+      _prof = rProf.ok ? rProf.data : null;
+      if (rPosts.ok && rPosts.data != null) {
+        _posts = rPosts.data!;
+      }
       _loading = false;
     });
+  }
+
+  Future<void> _togglePostLike(MagazinePost post) async {
+    final idx = _posts.indexWhere((x) => x.id == post.id);
+    if (idx < 0) return;
+    final res = await ApiService.I.toggleMagazineLike(post.id);
+    if (!mounted || !res.ok || res.data == null) return;
+    final i2 = _posts.indexWhere((x) => x.id == post.id);
+    if (i2 < 0) return;
+    setState(() {
+      _posts[i2] = _posts[i2].copyWith(
+        likedByMe: res.data!['liked'] == true,
+        likesCount: res.data!['likes_count'] is int
+            ? res.data!['likes_count'] as int
+            : _posts[i2].likesCount,
+      );
+    });
+  }
+
+  Future<void> _deletePost(MagazinePost post) async {
+    final s = AppState.I.str;
+    final res = await ApiService.I.deleteMagazinePost(post.id);
+    if (!mounted) return;
+    if (res.ok) {
+      setState(() => _posts.removeWhere((p) => p.id == post.id));
+      showGlassToast(context, s.postDeleted, icon: Icons.delete_outline_rounded);
+    }
   }
 
   String _p(String key, [String fallback = '']) =>
@@ -127,7 +165,7 @@ class _ProfilePageState extends State<ProfilePage>
                       imageUrl: ApiService.I.absoluteUrl(_p('profile_cover')),
                       fit: BoxFit.cover,
                       memCacheWidth: 720,
-                      httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                      httpHeaders: ApiService.I.authHeadersFor(_p('profile_cover')),
                       errorWidget: (_, __, ___) => _defaultCover(p),
                     ),
                   )
@@ -217,7 +255,12 @@ class _ProfilePageState extends State<ProfilePage>
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               child: Row(
                 children: [
-                  _statTap(p, '0', s.posts, null),
+                  _statTap(
+                    p,
+                    '${_posts.isNotEmpty ? _posts.length : _asInt(_prof?['posts_count'] ?? _prof?['posts'])}',
+                    s.posts,
+                    () => _tabs.animateTo(0),
+                  ),
                   _divider(p),
                   _statTap(p, '$followers', s.followers, () => _openFollowList(true)),
                   _divider(p),
@@ -256,34 +299,74 @@ class _ProfilePageState extends State<ProfilePage>
             ),
           ),
 
-          // ---------- tabs ----------
+          // ---------- tabs (real Posts + About) ----------
           Transform.translate(
             offset: const Offset(0, -20),
             child: Column(
               children: [
                 TabBar(
                   controller: _tabs,
-                  indicatorColor: Colors.transparent,
+                  indicatorColor: p.accent,
                   dividerColor: Colors.transparent,
                   labelColor: p.text,
                   unselectedLabelColor: p.pfMeta,
                   labelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
                   unselectedLabelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-                  indicatorSize: TabBarIndicatorSize.tab,
+                  indicatorSize: TabBarIndicatorSize.label,
                   tabs: [
                     Tab(text: s.tabPosts, height: 44),
                     Tab(text: s.tabAbout, height: 44),
-                    Tab(text: s.tabProjects, height: 44),
                   ],
                 ),
                 SizedBox(
-                  height: 190,
+                  height: _posts.isEmpty ? 190 : 300,
                   child: TabBarView(
                     controller: _tabs,
                     children: [
-                      _empty(p, Icons.auto_awesome_outlined, s.nothingHere, s.shareFirstPost),
+                      _posts.isEmpty
+                          ? Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.auto_awesome_outlined, size: 30, color: p.text3),
+                                  const SizedBox(height: 8),
+                                  Text(s.noPostsYet,
+                                      style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: p.text)),
+                                  const SizedBox(height: 10),
+                                  FilledButton.icon(
+                                    onPressed: () async {
+                                      final created = await MagazineComposerSheet.show(context);
+                                      if (created != null && mounted) {
+                                        setState(() => _posts.insert(0, created));
+                                      }
+                                    },
+                                    icon: const Icon(Icons.edit_rounded, size: 16),
+                                    label: Text(s.newPost),
+                                    style: FilledButton.styleFrom(backgroundColor: p.accent),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : ListView.builder(
+                              padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                              itemCount: _posts.length,
+                              itemBuilder: (ctx, i) => MagazinePostCard(
+                                post: _posts[i],
+                                onLike: () => _togglePostLike(_posts[i]),
+                                onReplies: () async {
+                                  final d = await MagazineRepliesSheet.show(ctx, post: _posts[i]);
+                                  if (d != null && d > 0 && mounted) {
+                                    setState(() {
+                                      _posts[i] = _posts[i].copyWith(
+                                        repliesCount: _posts[i].repliesCount + d,
+                                      );
+                                    });
+                                  }
+                                },
+                                onDelete: () => _deletePost(_posts[i]),
+                              ),
+                            ),
                       _about(p, s),
-                      _empty(p, Icons.folder_outlined, s.nothingHere, s.stayTuned),
                     ],
                   ),
                 ),

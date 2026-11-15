@@ -73,7 +73,7 @@ class PlayerBar extends StatelessWidget {
                             imageUrl: avatarUrl,
                             fit: BoxFit.cover,
                             memCacheWidth: 220,
-                            httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                            httpHeaders: ApiService.I.authHeadersFor(avatarUrl),
                             errorWidget: (_, __, ___) =>
                                 const SizedBox.shrink(),
                           ),

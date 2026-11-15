@@ -130,10 +130,17 @@ class _AccountsSheetState extends State<AccountsSheet> {
       _checkingLimit = true;
       _limitShown = false;
     });
-    // anyPro = the CURRENT user is Pro (raises the cap to 5). If the profile
-    // fetch fails we stay conservative (normal cap = 3).
+    // Check if the current user OR any stored account is Pro (raises cap to 5).
     final res = await ApiService.I.userProfile(AppState.I.me.value.username);
-    final anyPro = res.ok && (res.data?['is_pro'] == true);
+    final currentIsPro = res.ok && (res.data?['is_pro'] == true);
+    if (res.ok) {
+      await AccountManager.I.refreshActive(
+        name: '${res.data?['name'] ?? AppState.I.me.value.name}',
+        avatar: '${res.data?['avatar'] ?? AppState.I.me.value.avatar}',
+        isPro: currentIsPro,
+      );
+    }
+    final anyPro = currentIsPro || AccountManager.I.hasAnyStoredPro;
     if (!mounted) return;
     setState(() => _checkingLimit = false);
     if (AccountManager.I.canAddAccount(anyPro: anyPro)) {

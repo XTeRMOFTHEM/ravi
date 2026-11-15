@@ -13,8 +13,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ravi/core/api_service.dart';
 import 'package:ravi/core/app_state.dart';
+import 'package:ravi/core/constants.dart';
 
 void main() {
+  final hasBackend =
+      kBaseUrl.startsWith('http://') || kBaseUrl.startsWith('https://');
+
   testWidgets('LIVE: register → identity → rooms authorized → re-login',
       (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
@@ -70,5 +74,9 @@ void main() {
     await AppState.I.forceRelogin(localOnly: true);
     expect(AppState.I.kicked.value, isTrue);
     AppState.I.kicked.value = false;
-  }, timeout: const Timeout(Duration(seconds: 120)));
+  },
+      timeout: const Timeout(Duration(seconds: 120)),
+      skip: !hasBackend
+          ? 'Pass --dart-define=RAVI_BASE_URL=http://127.0.0.1:5000 to run live API smoke test.'
+          : false);
 }

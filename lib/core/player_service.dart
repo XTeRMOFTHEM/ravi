@@ -62,7 +62,8 @@ class PlayerService extends ChangeNotifier {
   Duration get duration => _dur;
   bool get playing => _playing;
   double get speed => _speed;
-  String get speedLabel => _speed == 1.0 ? '1x' : '${_speed}x'.replaceAll('.0', 'x');
+  String get speedLabel =>
+      _speed == 1.0 ? '1x' : '${_speed}x'.replaceFirst('.0x', 'x');
 
   bool isCurrent(String url) =>
       _current != null &&
@@ -132,7 +133,12 @@ class PlayerService extends ChangeNotifier {
         }
         await p.resume();
         if (p.state == PlayerState.stopped) {
-          await p.play(UrlSource(ApiService.I.absoluteUrl(_current!.url)));
+          final hasLocal = _current!.localPath.isNotEmpty &&
+              File(_current!.localPath).existsSync();
+          final src = hasLocal
+              ? DeviceFileSource(_current!.localPath)
+              : UrlSource(ApiService.I.absoluteUrl(_current!.url));
+          await p.play(src);
         }
       }
     } catch (_) {}

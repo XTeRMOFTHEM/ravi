@@ -621,4 +621,23 @@ class S {
   String get globalTipRooms => _t('public room @username → join panel', '@username عمومی → پنل عضویت');
   String get globalTipChats => _t('your chats filter instantly as you type', 'چت‌های خودت همان لحظه فیلتر می‌شوند');
   String membersCountShort(int n) => _t('$n members', '$n عضو');
+
+  // magazine & profile posts (real backend-backed)
+  String get newPost => _t('New Post', 'پست جدید');
+  String get publishPost => _t('Publish', 'انتشار');
+  String get postTitleHint => _t('Channel or title (optional)', 'عنوان یا کانال (اختیاری)');
+  String get postContentHint => _t('What would you like to share?', 'چه چیزی می‌خواهید به اشتراک بگذارید؟');
+  String get postPublished => _t('Post published', 'پست منتشر شد');
+  String get postDeleted => _t('Post deleted', 'پست حذف شد');
+  String get repliesTitle => _t('Replies', 'پاسخ‌ها');
+  String get writeReplyHint => _t('Write a reply…', 'پاسخی بنویسید…');
+  String get noPostsYet => _t('No posts yet', 'هنوز پستی منتشر نشده');
+  String get noRepliesYet => _t('No replies yet — be the first!', 'هنوز پاسخی ثبت نشده — اولین نفر باشید!');
+  String get copiedToClipboard => _t('Copied to clipboard', 'در کلیپ‌بورد کپی شد');
+  String get reportReasonHint => _t('Reason (optional)…', 'علت گزارش (اختیاری)…');
+  String get aiAssistantTitle => _t('RAVI AI', 'هوش مصنوعی راوی');
+  String get aiAssistantSub => _t('Smart assistant · Math, Persian & English', 'دستیار هوشمند · ریاضی، فارسی و انگلیسی');
+  String get aiAskHint => _t('Ask RAVI AI anything…', 'هر سؤالی از هوش مصنوعی راوی بپرسید…');
+  String get aiProBadge => _t('PRO', 'پرو');
+  String get tapToDownload => _t('Tap to download', 'برای دانلود لمس کنید');
 }

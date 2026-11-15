@@ -438,7 +438,7 @@ class _PopChipState extends State<_PopChip>
                 imageUrl: url,
                 fit: BoxFit.cover,
                 memCacheWidth: 40,
-                httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                httpHeaders: ApiService.I.authHeadersFor(url),
                 errorWidget: (_, __, ___) => Center(
                   child: Text(
                     u.username.isNotEmpty ? u.username[0].toUpperCase() : '?',

@@ -86,8 +86,12 @@ class _GlobalSearchScreenState extends State<GlobalSearchScreen> {
       _noGlobal = false;
     });
     // resolve user + public room in parallel
-    final up = await ApiService.I.userProfile(raw);
-    final rr = await ApiService.I.roomResolve(raw);
+    final results = await Future.wait([
+      ApiService.I.userProfile(raw),
+      ApiService.I.roomResolve(raw),
+    ]);
+    final up = results[0];
+    final rr = results[1];
     if (!mounted || _q.text.trim().replaceFirst(RegExp(r'^@'), '') != raw) {
       return; // stale
     }
@@ -253,6 +257,7 @@ class _GlobalSearchScreenState extends State<GlobalSearchScreen> {
           peerUsername: c.peerUsername,
           roomId: c.roomId,
           canPost: c.canPost,
+          isSelfChat: c.isSelf,
         ));
       },
       child: Container(

@@ -138,7 +138,10 @@ class ChatController extends ChangeNotifier {
 
   String get socketRoom => kind == ChatKind.pv ? 'pv_$chatId' : roomId;
 
-  StreamSubscription? _subNew, _subNewPv, _subTyping, _subOnline, _subDel, _subStatus, _subUserOn, _subUserOff, _subReactions, _subEdited, _subPins;
+  static int _cmidSeq = 0;
+  static String _nextCmid() => 'm_${DateTime.now().millisecondsSinceEpoch}_${++_cmidSeq}';
+
+  StreamSubscription? _subNew, _subNewPv, _subTyping, _subOnline, _subDel, _subStatus, _subUserOn, _subUserOff, _subReactions, _subEdited, _subPins, _subPvRead, _subMsgSeen, _subRoomMeta;
   // v1.1.0 — PV seen-tick poller (cancelled on dispose)
   Timer? _seenTimer;
 
@@ -219,7 +222,7 @@ class ChatController extends ChangeNotifier {
     // 1b) pv header info (real last seen) — non-blocking
     if (kind == ChatKind.pv && chatId > 0) {
       ApiService.I.pvInfo(chatId).then((res) {
-        if (res.ok && res.data != null) {
+        if (!_disposed && res.ok && res.data != null) {
           _pvInfo = PvInfo.fromJson(res.data!);
           notifyListeners();
         }
@@ -340,6 +343,7 @@ class ChatController extends ChangeNotifier {
       default:
         res = await ApiService.I.roomMessages(roomId, limit: 60);
     }
+    if (_disposed) return;
     if (res.ok && res.data != null) {
       final fresh = res.data!.where(_keep).toList();
       // Preserve pending/failed optimistic messages at the tail.
@@ -372,6 +376,7 @@ class ChatController extends ChangeNotifier {
   /// ({messages, can_post, room_type…}) so groups & channels finally load.
   Future<void> _refreshRoom() async {
     final res = await ApiService.I.roomMessagesFull(roomId, limit: 60);
+    if (_disposed) return;
     if (res.ok && res.data != null) {
       final hist = res.data!;
       final tail = _messages.where((m) => m.pending || m.failed).toList();
@@ -419,6 +424,7 @@ class ChatController extends ChangeNotifier {
       ChatKind.pv => await ApiService.I.pvMessages(chatId, before: oldest, limit: 40),
       _ => await ApiService.I.roomMessages(roomId, before: oldest, limit: 40),
     };
+    if (_disposed) return;
     if (res.ok && res.data != null) {
       final older = res.data!.where(_keep).toList();
       if (older.isNotEmpty) {
@@ -589,6 +595,44 @@ class ChatController extends ChangeNotifier {
         loadPins();
       }
     });
+    _subPvRead = sock.onPvReadAll.listen((d) {
+      if (kind != ChatKind.pv) return;
+      final cid = '${d['chat_id'] ?? ''}';
+      if (cid != '$chatId') return;
+      var changed = false;
+      for (var i = 0; i < _messages.length; i++) {
+        if (_messages[i].isMe && !_messages[i].isRead) {
+          _messages[i] = _messages[i].copyWith(isRead: true);
+          changed = true;
+        }
+      }
+      if (changed) {
+        _persist();
+        notifyListeners();
+      }
+    });
+    _subMsgSeen = sock.onMessageSeen.listen((d) {
+      final id = d['message_id'] is int
+          ? d['message_id'] as int
+          : int.tryParse('${d['message_id']}') ?? 0;
+      if (id <= 0) return;
+      final i = _messages.indexWhere((m) => m.id == id);
+      if (i < 0) return;
+      final sc = d['seen_count'] is int
+          ? d['seen_count'] as int
+          : int.tryParse('${d['seen_count']}') ?? (_messages[i].seenCount + 1);
+      _messages[i] = _messages[i].copyWith(
+        isRead: _messages[i].isMe ? true : _messages[i].isRead,
+        seenCount: sc,
+      );
+      _persist();
+      notifyListeners();
+    });
+    _subRoomMeta = sock.onRoomMetaUpdated.listen((d) {
+      if (kind != ChatKind.group && kind != ChatKind.channel) return;
+      final rid = '${d['room_id'] ?? ''}';
+      if (rid == roomId) reloadMeta();
+    });
     _subReactions = sock.onReactionUpdate.listen((d) {
       final id = (d['message_id'] is int)
           ? d['message_id'] as int
@@ -699,7 +743,7 @@ class ChatController extends ChangeNotifier {
     holdIncoming = false;
     flushIncoming();
     final now = DateTime.now();
-    final cmid = 'm_${now.millisecondsSinceEpoch}';
+    final cmid = _nextCmid();
     final msg = Message(
       id: 0,
       clientMsgId: cmid,
@@ -802,37 +846,89 @@ class ChatController extends ChangeNotifier {
   void retryFailed(String cmid) {
     final idx = _messages.indexWhere((m) => m.clientMsgId == cmid);
     if (idx < 0) return;
-    _messages[idx] = _messages[idx].copyWith(pending: true, failed: false);
+    final m = _messages[idx];
+    // If a media upload failed before receiving a server fileUrl, re-run the
+    // upload from localPath instead of emitting a broken file_url=null message.
+    if (m.fileType != 'text' && m.fileUrl.isEmpty && m.localPath.isNotEmpty) {
+      _messages.removeAt(idx);
+      _persist();
+      notifyListeners();
+      unawaited(sendMedia(
+        m.localPath,
+        fileType: m.fileType,
+        caption: m.text,
+        replyToId: m.replyToId,
+        replyAuthor: m.replyAuthor,
+        replyText: m.replyText,
+        albumId: m.albumId,
+        isVoiceNote: m.isVoiceNote,
+        durationMs: m.mediaDurMs,
+        mediaTitle: m.mediaTitle,
+        mediaArtist: m.mediaArtist,
+        mediaCover: m.mediaCover,
+        mediaWidth: m.mediaW,
+        mediaHeight: m.mediaH,
+      ));
+      return;
+    }
+    _messages[idx] = m.copyWith(pending: true, failed: false);
     notifyListeners();
     SocketService.I.emit('send_message', _payloadFor(_messages[idx]));
     unawaited(_awaitConfirmation(cmid));
   }
 
   /// Toggle an emoji reaction on a confirmed message.
+  /// Mirrors backend semantics: one active reaction per user per message.
   void toggleReaction(Message m, String emoji) {
     if (m.id <= 0) return; // optimistic messages can't carry reactions yet
     SocketService.I.toggleReaction(m.id, emoji,
         chatId: kind == ChatKind.pv ? chatId : null);
-    // Optimistic local toggle; the reaction_update echo confirms it.
     final mine = ApiService.I.cachedUsername;
-    final list = List<ReactionSummary>.from(m.reactions);
-    final i = list.indexWhere((r) => r.emoji == emoji);
-    if (i >= 0) {
-      final r = list[i];
+    final list = <ReactionSummary>[];
+    var toggledOffSame = false;
+    for (final r in m.reactions) {
       final hadMine = r.usernames.contains(mine);
-      if (hadMine && r.count <= 1) {
-        list.removeAt(i);
+      if (r.emoji == emoji) {
+        if (hadMine) {
+          toggledOffSame = true;
+          if (r.count > 1) {
+            list.add(ReactionSummary(
+              emoji: r.emoji,
+              count: r.count - 1,
+              usernames: r.usernames.where((u) => u != mine).toList(),
+              reactors: r.reactors.where((u) => u.username != mine).toList(),
+            ));
+          }
+        } else {
+          list.add(ReactionSummary(
+            emoji: r.emoji,
+            count: r.count + 1,
+            usernames: [...r.usernames, mine],
+            reactors: [...r.reactors, ReactionUser(username: mine, avatar: ApiService.I.cachedAvatar)],
+          ));
+          toggledOffSame = false;
+        }
+      } else if (hadMine) {
+        // Switching reaction to a different emoji removes previous mine
+        if (r.count > 1) {
+          list.add(ReactionSummary(
+            emoji: r.emoji,
+            count: r.count - 1,
+            usernames: r.usernames.where((u) => u != mine).toList(),
+            reactors: r.reactors.where((u) => u.username != mine).toList(),
+          ));
+        }
       } else {
-        list[i] = ReactionSummary(
-          emoji: r.emoji,
-          count: r.count + (hadMine ? -1 : 1),
-          usernames: hadMine
-              ? r.usernames.where((u) => u != mine).toList()
-              : [...r.usernames, mine],
-        );
+        list.add(r);
       }
-    } else {
-      list.add(ReactionSummary(emoji: emoji, count: 1, usernames: [mine]));
+    }
+    if (!toggledOffSame && !list.any((r) => r.emoji == emoji)) {
+      list.add(ReactionSummary(
+        emoji: emoji,
+        count: 1,
+        usernames: [mine],
+        reactors: [ReactionUser(username: mine, avatar: ApiService.I.cachedAvatar)],
+      ));
     }
     final idx = _messages.indexWhere((x) => x.id == m.id);
     if (idx >= 0) {
@@ -847,7 +943,7 @@ class ChatController extends ChangeNotifier {
     if (!res.ok) return null;
     final url = res.data?['file_url'] ?? '';
     final now = DateTime.now();
-    final cmid = 'm_${now.millisecondsSinceEpoch}';
+    final cmid = _nextCmid();
     final msg = Message(
       id: 0,
       clientMsgId: cmid,
@@ -897,7 +993,7 @@ class ChatController extends ChangeNotifier {
     holdIncoming = false;
     flushIncoming();
     final now = DateTime.now();
-    final cmid = 'm_${now.millisecondsSinceEpoch}';
+    final cmid = _nextCmid();
     int size = 0;
     try {
       size = File(filePath).lengthSync();
@@ -939,11 +1035,10 @@ class ChatController extends ChangeNotifier {
       replyText: replyText,
     );
     _messages.add(msg);
-    _sending = true;
     notifyListeners();
     _persist();
 
-    // Upload with live progress (throttled UI updates).
+    // Upload with live progress (non-blocking: user can still send text while uploading).
     final token = TransferCancelToken();
     UploadRegistry.tokens[cmid] = token;
     DateTime lastTick = DateTime.fromMillisecondsSinceEpoch(0);
@@ -966,14 +1061,12 @@ class ChatController extends ChangeNotifier {
     if (token.isCancelled) {
       // کاربر ✕ زد: حباب بی‌سروصدا حذف می‌شود (نه «ناموفق»)
       _messages.removeWhere((m) => m.clientMsgId == cmid);
-      _sending = _messages.any((m) => m.pending);
       if (!_disposed) {
         _persist();
         notifyListeners();
       }
       return false;
     }
-    _sending = false;
     if (!_disposed && res.ok && res.data != null) {
       final url = res.data!['file_url'] ?? '';
       if (url.isEmpty) return false;
@@ -1054,16 +1147,17 @@ class ChatController extends ChangeNotifier {
     final idx = _messages.indexWhere((x) => x.id == m.id);
     if (idx < 0) return false;
     final old = _messages[idx].text;
+    final wasEdited = _messages[idx].isEdited;
     _messages[idx] =
         _messages[idx].copyWith(text: text, isEdited: true);
     _persist();
     notifyListeners();
     final r = await ApiService.I.editMessage(m.id, text);
     if (r.ok) return true;
-    // roll back on failure
+    // roll back on failure, preserving prior edited flag
     final i2 = _messages.indexWhere((x) => x.id == m.id);
     if (i2 >= 0 && !_disposed) {
-      _messages[i2] = _messages[i2].copyWith(text: old, isEdited: false);
+      _messages[i2] = _messages[i2].copyWith(text: old, isEdited: wasEdited);
       _persist();
       notifyListeners();
     }
@@ -1079,7 +1173,7 @@ class ChatController extends ChangeNotifier {
     String? replyText,
   }) async {
     final now = DateTime.now();
-    final cmid = 'm_${now.millisecondsSinceEpoch}';
+    final cmid = _nextCmid();
     final msg = Message(
       id: 0,
       clientMsgId: cmid,
@@ -1115,7 +1209,7 @@ class ChatController extends ChangeNotifier {
     holdIncoming = false;
     flushIncoming();
     final now = DateTime.now();
-    final cmid = 'm_${now.millisecondsSinceEpoch}';
+    final cmid = _nextCmid();
     final msg = Message(
       id: 0,
       clientMsgId: cmid,
@@ -1187,7 +1281,15 @@ class ChatController extends ChangeNotifier {
   Timer? _persistTimer;
 
   void _doPersist() {
-    if (_messages.isEmpty) return;
+    // Persist even when empty so deleting the last message in a chat doesn't
+    // resurrect it from disk cache on reopen (guard on historyLoaded so an
+    // unopened/errored empty controller doesn't wipe valid cache).
+    if (_messages.isEmpty) {
+      if (historyLoaded) {
+        CacheService.I.put(cacheKey, <Map<String, dynamic>>[]);
+      }
+      return;
+    }
     // Keep only the most recent 200 messages on disk (fast + bounded).
     final slice = _messages.length > 200
         ? _messages.sublist(_messages.length - 200)
@@ -1219,6 +1321,9 @@ class ChatController extends ChangeNotifier {
     _subReactions?.cancel();
     _subEdited?.cancel(); // BUGFIX (v1.5.1) — was leaking; fired after dispose
     _subPins?.cancel();
+    _subPvRead?.cancel();
+    _subMsgSeen?.cancel();
+    _subRoomMeta?.cancel();
     switch (kind) {
       case ChatKind.general:
         SocketService.I.leaveGeneral();

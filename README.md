@@ -48,7 +48,10 @@ Light and dark themes, **8 live accent colors** that recolor the whole app insta
 Switch between saved accounts right from the app.
 
 ### <img src="docs/icons/folder.svg" width="20"> Data and storage
-Clear caches, manage downloads, global search across chats.
+Clear caches (images, persistent media, audio, and metadata), manage downloads with automatic 350 MB disk LRU eviction, control auto-download & gallery saving, and search across chats.
+
+### <img src="docs/icons/chat.svg" width="20"> Magazine & RAVI AI
+Publish, like, reply to, and filter community posts in the **Magazine** tab (synced with user profiles), and chat with **RAVI AI** (Standard & Pro modes) backed by the server's AI endpoints.
 
 ### <img src="docs/icons/rocket.svg" width="20"> Performance-first
 Cached list extents, constant list animations and clamping scroll physics keep it smooth on low-end phones.
@@ -56,16 +59,18 @@ Cached list extents, constant list animations and clamping scroll physics keep i
 ## Backend
 
 > [!NOTE]
-> This repository ships the RAVI **client**, and the app builds **not connected** by default — straight after cloning, `kBaseUrl` points nowhere. To run a fully working messenger you connect it to a **RAVI-compatible backend**.
+> This repository ships both the RAVI Flutter **client** and the Python/Flask **backend**. Straight after cloning, `kBaseUrl` defaults to a placeholder (`<your-backend-url>`). Point the client at your backend using `--dart-define=RAVI_BASE_URL=...` (recommended) or by editing `lib/core/constants.dart`.
 
-1. Set your server address in **`lib/core/constants.dart`**:
+1. Pass your server address at build/run time (recommended):
 
-   ```dart
-   const String kBaseUrl = '<your-backend-url>'; // e.g. 'http://localhost:5000'
+   ```bash
+   flutter run --dart-define=RAVI_BASE_URL=https://your-ravi-server.example.com
    ```
 
-2. **A ready-to-run RAVI backend lives in this repository** — see [`backend/`](backend) and its [README](backend/README.md) for the fast/quick run guide (`pip install -r requirements.txt && python app.py`).
-3. The backend exposes a small REST surface — auth/user (`/api/user`), sessions (`/api/sessions`), rooms (`/api/rooms`, `/api/room`), private chats (`/api/pv/…`), avatar frames (`/api/frames`) — plus the **Socket.IO** realtime layer (messages, typing, reads, reactions, room events). The client is server-agnostic and can be pointed at any compatible deployment.
+   Or set `kBaseUrl` in **`lib/core/constants.dart`**. Android defaults to **HTTPS** (`cleartextTrafficPermitted="false"`), with localhost/LAN cleartext allowed for local development in `android/app/src/main/res/xml/network_security_config.xml`.
+
+2. **A ready-to-run RAVI backend lives in this repository** — see [`backend/`](backend) and its [README](backend/README.md) for setup, environment variables, and running the `pytest` suite (`pytest backend/tests/`).
+3. The backend exposes REST endpoints — auth/session (`/api/me`, `/api/user`, `/api/sessions`), rooms (`/api/rooms`, `/api/room`), private chats (`/api/pv/…`), avatar frames (`/api/frames`), Magazine & user posts (`/api/magazine/posts`, `/api/users/<username>/posts`), and RAVI AI (`/api/ai_chat`, `/api/ai_pro_chat`) — plus the **Socket.IO** realtime layer.
 
 ## Getting started
 
@@ -73,11 +78,21 @@ Cached list extents, constant list animations and clamping scroll physics keep i
 git clone https://github.com/XTeRMOFTHEM/ravi.git
 cd ravi
 flutter pub get
-flutter run                 # run on a device/emulator
-flutter build apk --release # release APK
+flutter run --dart-define=RAVI_BASE_URL=http://10.0.2.2:5000
+flutter test test/identity_parser_test.dart test/client_logic_test.dart
 ```
 
-> Requires Flutter SDK `3.44+` (Dart `3.13+`). App icons are generated with `flutter_launcher_icons` from `assets/images/`; use your own keystore for release signing.
+### Release APK signing
+
+Create `android/key.properties` (git-ignored) with `storeFile`, `storePassword`, `keyAlias`, and `keyPassword`, then run:
+
+```bash
+flutter build apk --release --dart-define=RAVI_BASE_URL=https://your-ravi-server.example.com
+```
+
+Release builds refuse to sign with the debug keystore unless `-PallowDebugReleaseSigning=true` is explicitly passed.
+
+> Requires Flutter SDK `3.44+` (Dart `3.13+`). App icons are generated with `flutter_launcher_icons` from `assets/images/`.
 
 ## Project structure
 

@@ -4,6 +4,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
+import '../../core/app_state.dart';
 import '../../core/constants.dart';
 
 /// v1.0.6 — professional, glassy alerts used across the app.
@@ -35,53 +36,56 @@ void showGlassToast(
             left: 0,
             right: 0,
             child: IgnorePointer(
-              child: Opacity(
-                opacity: t.clamp(0.0, 1.0),
-                child: Transform.translate(
-                  offset: Offset(0, top ? -26 * (1 - t) : 26 * (1 - t)),
-                  child: Center(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(30),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 10),
-                          decoration: BoxDecoration(
-                            color: dark
-                                ? const Color(0xE6151B22)
-                                : const Color(0xF0FFFFFF),
-                            borderRadius: BorderRadius.circular(30),
-                            border: Border.all(
+              child: Material(
+                type: MaterialType.transparency,
+                child: Opacity(
+                  opacity: t.clamp(0.0, 1.0),
+                  child: Transform.translate(
+                    offset: Offset(0, top ? -26 * (1 - t) : 26 * (1 - t)),
+                    child: Center(
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(30),
+                        child: BackdropFilter(
+                          filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 10),
+                            decoration: BoxDecoration(
                               color: dark
-                                  ? Colors.white.withValues(alpha: .09)
-                                  : Colors.black.withValues(alpha: .06),
+                                  ? const Color(0xE6151B22)
+                                  : const Color(0xF0FFFFFF),
+                              borderRadius: BorderRadius.circular(30),
+                              border: Border.all(
+                                color: dark
+                                    ? Colors.white.withValues(alpha: .09)
+                                    : Colors.black.withValues(alpha: .06),
+                              ),
+                              boxShadow: const [
+                                BoxShadow(
+                                    color: Color(0x40000000),
+                                    blurRadius: 24,
+                                    offset: Offset(0, 8)),
+                              ],
                             ),
-                            boxShadow: const [
-                              BoxShadow(
-                                  color: Color(0x40000000),
-                                  blurRadius: 24,
-                                  offset: Offset(0, 8)),
-                            ],
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(icon, size: 17, color: c),
-                              const SizedBox(width: 8),
-                              Flexible(
-                                child: Text(
-                                  msg,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    fontSize: 12.5,
-                                    fontWeight: FontWeight.w700,
-                                    color: dark ? Colors.white : C.textL,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(icon, size: 17, color: c),
+                                const SizedBox(width: 8),
+                                Flexible(
+                                  child: Text(
+                                    msg,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 12.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: dark ? Colors.white : C.textL,
+                                    ),
                                   ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
                       ),
@@ -111,15 +115,20 @@ class _ToastController extends ChangeNotifier {
       vsync: _TickerProvider(), duration: const Duration(milliseconds: 260))
     ..addListener(notifyListeners);
 
-  double get t {
-    final a = CurvedAnimation(parent: c,
-        curve: Curves.easeOutCubic, reverseCurve: Curves.easeInCubic);
-    return a.value;
-  }
+  late final CurvedAnimation _curved = CurvedAnimation(
+    parent: c,
+    curve: Curves.easeOutCubic,
+    reverseCurve: Curves.easeInCubic,
+  );
+
+  double get t => _curved.value;
 
   void forward() => c.forward();
   Future<void> reverse() => c.reverse();
-  void disposeNow() => c.dispose();
+  void disposeNow() {
+    _curved.dispose();
+    c.dispose();
+  }
 }
 
 class _TickerProvider extends TickerProvider {
@@ -218,7 +227,7 @@ Future<bool> showRaviModal(
                                     : Colors.black.withValues(alpha: .05),
                                 borderRadius: BorderRadius.circular(13),
                               ),
-                              child: Text(cancelText ?? 'لغو',
+                              child: Text(cancelText ?? AppState.I.str.cancel,
                                   style: TextStyle(
                                       fontSize: 13,
                                       fontWeight: FontWeight.w700,
@@ -380,7 +389,7 @@ Future<bool?> showRaviPrompt(
                                     : Colors.black.withValues(alpha: .05),
                                 borderRadius: BorderRadius.circular(13),
                               ),
-                              child: Text(cancelText ?? 'لغو',
+                              child: Text(cancelText ?? AppState.I.str.cancel,
                                   style: TextStyle(
                                       fontSize: 13,
                                       fontWeight: FontWeight.w700,
