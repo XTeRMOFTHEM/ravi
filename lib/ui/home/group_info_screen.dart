@@ -60,8 +60,12 @@ class _GroupInfoScreenState extends State<GroupInfoScreen>
   bool _muted = false;
 
   // tabs
-  late final TabController _tabs =
-      TabController(length: _isChannel ? 3 : 4, vsync: this);
+  // BUGFIX (v1.5.1) — channel/groups differ in tab count (3 vs 4) and the
+  // room type is only known AFTER the async load; the controller must be
+  // rebuilt with the right length or channels crash with "controller length
+  // does not match the number of tabs".
+  late TabController _tabs =
+      TabController(length: 4, vsync: this);
   bool get _isChannel => (_info?.roomType ?? 'group') == 'channel';
 
   // derived content (from room history)
@@ -85,6 +89,12 @@ class _GroupInfoScreenState extends State<GroupInfoScreen>
   Future<void> _load() async {
     final r = await ApiService.I.roomInfo(widget.roomId);
     if (!mounted) return;
+    // BUGFIX (v1.5.1) — rebuild the tab controller once the room type is
+    // known (channels have 3 tabs, groups 4). Read the type from the fresh
+    // response, not from the not-yet-updated _info.
+    final needLen = '${r.data?['room_type'] ?? 'group'}' == 'channel' ? 3 : 4;
+    _tabs.dispose();
+    _tabs = TabController(length: needLen, vsync: this);
     setState(() {
       _info = r.ok ? RoomInfo.fromJson(r.data!) : null;
       _settings = (r.data?['settings'] as Map?) == null
@@ -1244,11 +1254,17 @@ class _ManageSheetState extends State<_ManageSheet> {
     if (widget.info.roomType == 'channel') return;
     setState(() => _busy = true);
     final s = AppState.I.str;
-    await ApiService.I.setSlowMode(widget.info.roomId, _slow);
-    await ApiService.I.setRoomPerms(widget.info.roomId,
+    final r1 = await ApiService.I.setSlowMode(widget.info.roomId, _slow);
+    final r2 = await ApiService.I.setRoomPerms(widget.info.roomId,
         onlyAdmins: _onlyAdmins, sendMedia: _sendMedia, sendGifs: _sendGifs);
     if (!mounted) return;
     setState(() => _busy = false);
+    // BUGFIX (v1.5.1) — failures were reported as «Saved».
+    if (!r1.ok && !r2.ok) {
+      showGlassToast(context, s.error,
+          icon: Icons.error_outline_rounded, color: const Color(0xFFEF4444));
+      return;
+    }
     showGlassToast(context, s.saved, icon: Icons.check_circle_rounded);
     widget.onSaved();
     Navigator.of(context).pop();
@@ -1476,6 +1492,10 @@ class _MemberAdminSheetState extends State<_MemberAdminSheet> {
           icon: Icons.block_rounded, color: const Color(0xFFEF4444));
       widget.onDone();
       Navigator.of(context).pop();
+    } else {
+      // BUGFIX (v1.5.1) — a failed ban used to close nothing and say nothing.
+      showGlassToast(context, s.error,
+          icon: Icons.error_outline_rounded, color: const Color(0xFFEF4444));
     }
   }
 

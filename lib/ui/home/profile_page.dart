@@ -560,6 +560,9 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
   @override
   void dispose() {
     _checkDebounce?.cancel();
+    _name.dispose();
+    _bio.dispose();
+    _username.dispose();
     super.dispose();
   }
 

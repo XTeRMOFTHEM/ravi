@@ -35,7 +35,6 @@ class MessageActionPanel {
   static OverlayEntry? _current;
   static _PanelEntry? _currentAnim;
   static int? _currentMsgId;
-  static bool Function()? _closingGuard;
 
   /// Returns true when a panel was open and got closed (toggle consumed).
   static bool toggleFor(int msgId) {

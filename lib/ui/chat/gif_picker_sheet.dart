@@ -77,9 +77,6 @@ class _GifPickerGridState extends State<GifPickerGrid> {
   }
 
   Future<void> _confirmDelete(Map<String, dynamic> gif) async {
-    final p = Theme.of(context).brightness == Brightness.dark
-        ? const Palette.dark()
-        : const Palette.light();
     final s = AppState.I.str;
     final ok = await showRaviModal(
       context,

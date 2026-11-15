@@ -41,22 +41,23 @@ class _ForwardScreenState extends State<ForwardScreen> {
   bool _sending = false;
   String _query = '';
 
-  String _snippet(Message m) {
-    if (m.text.trim().isNotEmpty) return m.text.trim();
-    return m.previewSnippet;
-  }
-
   Future<void> _send() async {
     if (_picked.isEmpty || _sending) return;
     final s = AppState.I.str;
     setState(() => _sending = true);
     final chats = AppState.I.chats.value;
-    var sent = 0;
+    var sent = 0, failed = 0;
     for (final key in _picked) {
-      final c = chats.firstWhere(
-        (x) => x.key == key,
-        orElse: () => chats.first,
-      );
+      // BUGFIX (v1.5.1) — a vanished chat fell back to `chats.first` and
+      // forwarded the message to a RANDOM conversation; now it's skipped.
+      ChatPreview? c;
+      for (final x in chats) {
+        if (x.key == key) {
+          c = x;
+          break;
+        }
+      }
+      if (c == null) continue;
       for (final m in widget.messages) {
         final ApiResult<bool> res;
         if (c.kind == ChatKind.pv) {
@@ -64,16 +65,23 @@ class _ForwardScreenState extends State<ForwardScreen> {
         } else {
           res = await ApiService.I.forwardMessage(m.id, roomChatId: c.roomId);
         }
-        if (res.ok) sent++;
+        if (res.ok) {
+          sent++;
+        } else {
+          failed++;
+        }
       }
     }
     if (!mounted) return;
     setState(() => _sending = false);
+    if (failed > 0 && sent == 0) {
+      showGlassToast(context, s.error,
+          icon: Icons.error_outline_rounded, color: const Color(0xFFEF4444));
+      return;
+    }
     showGlassToast(context, s.forwardSent(_picked.length),
         icon: Icons.shortcut_rounded);
     Navigator.of(context).pop();
-    // silence analyzer: [sent] used for future per-item error reporting
-    assert(sent >= 0);
   }
 
   @override
