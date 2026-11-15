@@ -40,6 +40,9 @@ jobs:
           flutter-version: "3.47.9"
           cache: true
 
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
       - name: Point app at test backend
         run: |
           sed -i "s|const String kBaseUrl = '<your-backend-url>';|const String kBaseUrl = 'http://195.18.10.82:5000';|" lib/core/constants.dart
@@ -53,10 +56,24 @@ jobs:
 
       - name: Build debug APK
         run: flutter build apk --debug --no-pub
+        continue-on-error: true
+
+      - name: Locate built APK
+        run: |
+          echo "== outputs =="
+          find build android/app/build -name "*.apk" -type f 2>/dev/null | head -20
+          APK=$(find build android/app/build -name "*.apk" -type f 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then
+            echo "::error::No APK was produced by the build."
+            exit 1
+          fi
+          ls -la "$APK"
+          echo "APK=$APK" >> "$GITHUB_ENV"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: ravi-test-apk
-          path: build/app/outputs/flutter-apk/app-debug.apk
+          path: ${{ env.APK }}
+          if-no-files-found: error
           retention-days: 14
