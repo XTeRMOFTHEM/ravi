@@ -983,6 +983,164 @@ class MessageBubble extends StatelessWidget {
   }
 }
 
+/// Video thumbnail with a soft blurred copy of the frame behind the play
+/// glyph (the "empty/dry" box is gone). Caches by message id.
+/// BUGFIX (v1.5.1) — this class and [_SenderAvatar] below were accidentally
+/// dropped in the v1.5.0 commit while their call sites stayed, breaking the
+/// build; restored from v1.0.9.
+class VideoThumbTile extends StatefulWidget {
+  final String src;
+  final bool isLocal;
+  final double width;
+  final double height;
+  const VideoThumbTile({
+    super.key,
+    required this.src,
+    required this.isLocal,
+    required this.width,
+    required this.height,
+  });
+
+  @override
+  State<VideoThumbTile> createState() => _VideoThumbTileState();
+}
+
+class _VideoThumbTileState extends State<VideoThumbTile> {
+  Uint8List? _bytes;
+  static final Map<String, Uint8List> _cache = {};
+  static const MethodChannel _ch = MethodChannel('ravi/video_frame');
+
+  @override
+  void initState() {
+    super.initState();
+    final cached = _cache[widget.src];
+    if (cached != null) {
+      _bytes = cached;
+    } else {
+      _grab();
+    }
+  }
+
+  /// Native MediaMetadataRetriever bridge (the video_thumbnail plugin is
+  /// incompatible with AGP 9 and was dropped).
+  Future<void> _grab() async {
+    try {
+      final b = await _ch.invokeMethod<Uint8List>('getFrame', {
+        'path': widget.src,
+        'isUrl': !widget.isLocal,
+        'maxWidth': 480,
+        'cookie': ApiService.I.cookieHeader,
+      });
+      if (b != null && mounted) {
+        _cache[widget.src] = b;
+        setState(() => _bytes = b);
+      }
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final img = _bytes != null
+        ? Image.memory(_bytes!, fit: BoxFit.cover,
+            width: widget.width, height: widget.height, gaplessPlayback: true)
+        : const SizedBox.shrink();
+    return Stack(fit: StackFit.expand, children: [
+      if (_bytes != null) ...[
+        // blurred alive backdrop
+        ImageFiltered(
+          imageFilter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+          child: Transform.scale(scale: 1.25, child: img),
+        ),
+        // sharp frame in the middle (16:9 letterbox feel)
+        Center(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: SizedBox(
+              width: widget.width * 0.62,
+              height: widget.height * 0.72,
+              child: img,
+            ),
+          ),
+        ),
+      ] else
+        const Center(
+          child: SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2,
+                  color: Colors.white54)),
+        ),
+      // play glyph on top
+      Center(
+        child: Container(
+          width: 46,
+          height: 46,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: Colors.black.withValues(alpha: .35),
+            border: Border.all(
+                color: Colors.white.withValues(alpha: .5), width: 1.4),
+          ),
+          child: const Icon(Icons.play_arrow_rounded,
+              size: 30, color: Colors.white),
+        ),
+      ),
+    ]);
+  }
+}
+
+/// Small circular avatar next to other users' messages (group/general).
+class _SenderAvatar extends StatelessWidget {
+  final Message msg;
+  final double size;
+  const _SenderAvatar({required this.msg, this.size = 26});
+
+  @override
+  Widget build(BuildContext context) {
+    final url = ApiService.I.avatarUrl(msg.avatar);
+    return Container(
+      width: size, height: size,
+      margin: const EdgeInsets.only(bottom: 2),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: LinearGradient(
+          colors: C.avatarGradients[
+              msg.username.hashCode.abs() % C.avatarGradients.length],
+        ),
+      ),
+      child: ClipOval(
+        child: url.isNotEmpty
+            ? CachedNetworkImage(
+                imageUrl: url,
+                fit: BoxFit.cover,
+                memCacheWidth: 64,
+                httpHeaders: {'Cookie': ApiService.I.cookieHeader},
+                errorWidget: (_, __, ___) => Center(
+                  child: Text(
+                    msg.username.isEmpty
+                        ? '?'
+                        : msg.username[0].toUpperCase(),
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w800),
+                  ),
+                ),
+              )
+            : Center(
+                child: Text(
+                  msg.username.isEmpty ? '?' : msg.username[0].toUpperCase(),
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w800),
+                ),
+              ),
+      ),
+    );
+  }
+}
+
 /// v1.4.0 — چیپ دانلود ویدئو (مثل تلگرام): لمس = دانلود با حلقه‌ی درصد؛
 /// پایان = تیک سبز. وضعیت از MediaDownloadManager سراسری می‌آید.
 class _VideoDownloadChip extends StatelessWidget {

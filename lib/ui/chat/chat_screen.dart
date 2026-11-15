@@ -320,14 +320,46 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     _subSrvErr = sock.onServerError.listen((d) {
       final code = '${d['code'] ?? ''}';
-      if (code == 'rate_limited') {
-        final rem = (d['remaining'] ?? 0) is int
-            ? d['remaining'] as int
-            : int.tryParse('${d['remaining']}') ?? 5;
-        if (mounted) {
-          setState(() => _slowRemaining = rem);
-          _restartSlowTick();
-        }
+      switch (code) {
+        case 'rate_limited':
+        case 'slow_mode':
+          final rem = (d['remaining'] ?? 0) is int
+              ? d['remaining'] as int
+              : int.tryParse('${d['remaining']}') ?? 5;
+          if (mounted) {
+            setState(() => _slowRemaining = rem);
+            _restartSlowTick();
+          }
+          break;
+        // BUGFIX (v1.5.1) — server rejections were silently swallowed: the
+        // composer stayed open, the message stayed «sending» forever and the
+        // user never learned WHY it failed.
+        case 'blocked':
+        case 'blocked_by_user':
+          if (mounted) {
+            showGlassToast(context, AppState.I.str.blockedLiveToast,
+                icon: Icons.block_rounded, color: const Color(0xFFEF4444));
+            _refreshPv(); // re-read pvInfo so the banner/unblock UI updates
+          }
+          break;
+        case 'chat_locked':
+          if (mounted) {
+            showGlassToast(context, AppState.I.str.chatLockedToast,
+                icon: Icons.lock_rounded, color: const Color(0xFFF59E0B));
+          }
+          break;
+        case 'not_member':
+          if (mounted) {
+            showGlassToast(context, AppState.I.str.sendFailedToast,
+                icon: Icons.error_outline_rounded,
+                color: const Color(0xFFEF4444));
+          }
+          break;
+        default:
+          final msg = '${d['msg'] ?? d['message'] ?? ''}';
+          if (mounted && msg.isNotEmpty) {
+            showGlassToast(context, msg, icon: Icons.error_outline_rounded);
+          }
       }
     });
   }
@@ -361,9 +393,34 @@ class _ChatScreenState extends State<ChatScreen> {
     _subSrvErr?.cancel();
     _subMember?.cancel();
     _stickyDateN.dispose();
-    try {
-      _recorder.dispose();
-    } catch (_) {}
+    // BUGFIX (v1.5.1) — leaving the screen mid-recording kept the mic open
+    // and leaked the temp .m4a on disk. Stop + delete the file, then dispose.
+    if (_recording) {
+      _recording = false;
+      _recPaused = false;
+      _recLocked = false;
+      final p = _recPath;
+      _recPath = null;
+      unawaited(() async {
+        try {
+          final stopped = await _recorder.stop();
+          final f = (stopped != null && stopped.isNotEmpty) ? stopped : p;
+          if (f != null) File(f).delete();
+        } catch (_) {
+          try {
+            if (p != null) File(p).delete();
+          } catch (_) {}
+        } finally {
+          try {
+            _recorder.dispose();
+          } catch (_) {}
+        }
+      }());
+    } else {
+      try {
+        _recorder.dispose();
+      } catch (_) {}
+    }
     _ctl.dispose();
     _scroll.removeListener(_onScroll);
     _scroll.dispose();
@@ -704,10 +761,12 @@ class _ChatScreenState extends State<ChatScreen> {
           if (!ok) allOk = false;
         }
         _armSlowModeAfterSend(allOk);
+        // BUGFIX (v1.5.1) — reply was cleared even when the attach sheet was
+        // simply cancelled; now it only clears when a send actually happens.
+        _clearReply();
         return allOk;
       },
     );
-    _clearReply();
   }
 
   // v1.0.8 — _pickGif removed: GIFs are picked inside the combined
@@ -916,7 +975,9 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       return;
     }
-    await _ctl.sendMedia(file,
+    // BUGFIX (v1.5.1) — armed slow mode even when the voice send FAILED;
+    // now only a real success starts the local countdown.
+    final ok = await _ctl.sendMedia(file,
         fileType: 'audio',
         caption: '',
         // v1.2.1 — a recorded take IS a voice note (real duration included)
@@ -925,7 +986,7 @@ class _ChatScreenState extends State<ChatScreen> {
         replyToId: _replyToId,
         replyAuthor: _replyAuthor,
         replyText: _replyText);
-    _armSlowModeAfterSend(true);
+    _armSlowModeAfterSend(ok);
     _clearReply();
   }
 

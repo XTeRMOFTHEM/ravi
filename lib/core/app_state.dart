@@ -170,8 +170,7 @@ class AppState {
   void updatePvPreview(int chatId, String lastMessage, String lastTime, int unread, String otherUser,
       {String lastFileType = '',
       String displayName = '',
-      String avatar = '',
-      bool isSelf = false}) {
+      String avatar = ''}) {
     final list = List<ChatPreview>.from(chats.value);
     final i = list.indexWhere((c) => c.kind == ChatKind.pv && c.id == chatId);
     if (i >= 0) {
@@ -183,8 +182,11 @@ class AppState {
         lastUser: otherUser,
         // v1.3.2 — live GIF/music/video preview labels on the home screen
         lastFileType: lastFileType.isNotEmpty ? lastFileType : null,
-        // سیو مسیج فقط وقتی تغییر می‌کند که خودِ ایونت صریح بگوید
-        isSelf: isSelf || list[i].isSelf,
+        // BUGFIX (v1.5.1) — the event's `isSelf` flag means «the LAST MESSAGE
+        // is mine», NOT «this is the Saved-Messages self-chat». OR-ing it into
+        // ChatPreview.isSelf turned every PV the user replied to into a
+        // «Saved Messages» row (bookmark avatar + saved title + You: prefix).
+        isSelf: list[i].isSelf,
       );
     } else {
       // v1.5.0 — چت جدید: سطرِ کامل با اسم نمایشی + آواتار + @یوزرنیم ساخته
@@ -202,7 +204,10 @@ class AppState {
         unread: unread,
         lastUser: otherUser,
         lastFileType: lastFileType.isEmpty ? 'text' : lastFileType,
-        isSelf: isSelf,
+        // BUGFIX (v1.5.1) — a brand-new row must never start as the
+        // Saved-Messages self-chat; the silent refresh right below pulls the
+        // real `is_self` from the server list anyway.
+        isSelf: false,
       ));
       _scheduleSilentRefresh();
     }

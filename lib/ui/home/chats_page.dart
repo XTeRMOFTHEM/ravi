@@ -86,7 +86,9 @@ class _ChatsPageState extends State<ChatsPage>
                       'personal' => c.kind == ChatKind.pv,
                       'group' => c.kind == ChatKind.group,
                       'channel' => c.kind == ChatKind.channel,
-                      'official' => false,
+                      // BUGFIX (v1.5.1) — was hardcoded `false`: the official
+                      // tab was always empty.
+                      'official' => c.isOfficial,
                       _ => true,
                     };
                     if (!okCat) return false;
@@ -429,14 +431,15 @@ class _ChatsPageState extends State<ChatsPage>
                       ? s.unarchive
                       : s.archive,
                   color: p.accent,
-                  onTap: () {
+                  onTap: () async {
                     Navigator.pop(ctx);
-                    AppState.I
-                        .setArchived(chat, !AppState.I.isArchived(chat));
+                    // BUGFIX (v1.5.1) — compute the TARGET state before the
+                    // async setArchived; the toast then showed the wrong
+                    // (old) label because isArchived() hadn't flipped yet.
+                    final target = !AppState.I.isArchived(chat);
+                    await AppState.I.setArchived(chat, target);
                     showRaviToast(rowContext,
-                        AppState.I.isArchived(chat)
-                            ? s.archivedToast
-                            : s.unarchivedToast,
+                        target ? s.archivedToast : s.unarchivedToast,
                         icon: Icons.archive_outlined);
                   },
                 ),
@@ -500,7 +503,8 @@ class _ChatsPageState extends State<ChatsPage>
       ('personal', s.catPersonal),
       ('group', s.catGroup),
       ('channel', s.catChannel),
-      ('bot', s.catBot),
+      // BUGFIX (v1.5.1) — 'bot' chip removed: ChatKind has no bot kind and
+      // the filter silently fell into `_ => true`, showing every chat.
       ('official', s.catOfficial),
     ];
     return Container(

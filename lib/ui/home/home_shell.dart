@@ -68,7 +68,6 @@ class _HomeShellState extends State<HomeShell> with TickerProviderStateMixin, Wi
         lastFileType: '${d['last_file_type'] ?? ''}',
         displayName: '${d['sender_display_name'] ?? ''}',
         avatar: '${d['sender_avatar'] ?? ''}',
-        isSelf: d['is_self'] == true,
       );
     });
     _subGroupUnread = SocketService.I.onGroupUnread.listen((d) {

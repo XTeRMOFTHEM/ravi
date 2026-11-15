@@ -129,7 +129,11 @@ class SocketService {
       ..on('pv_chats_updated', (d) => _safeAdd(_pvChatsUpdated, d))
       ..on('user_typing', (d) => _safeAdd(_typing, d))
       ..on('online_list', (d) {
-        final list = (d is List) ? d.map((e) => '$e').toList() : <String>[];
+        // BUGFIX (v1.5.1) — the server emits {'users': [...]} (a Map), not a
+        // bare List; the old cast always produced an empty list, so the
+        // online-users panel never showed anyone.
+        final raw = (d is Map) ? d['users'] : d;
+        final list = (raw is List) ? raw.map((e) => '$e').toList() : <String>[];
         _onlineList.add(list);
       })
       ..on('user_online', (d) {

@@ -1217,6 +1217,7 @@ class ChatController extends ChangeNotifier {
     _subUserOn?.cancel();
     _subUserOff?.cancel();
     _subReactions?.cancel();
+    _subEdited?.cancel(); // BUGFIX (v1.5.1) — was leaking; fired after dispose
     _subPins?.cancel();
     switch (kind) {
       case ChatKind.general:
