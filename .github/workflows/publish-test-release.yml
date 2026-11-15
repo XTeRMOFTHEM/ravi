@@ -1,0 +1,158 @@
+name: Publish Test Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: publish-v1.5.1-test
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_RUN: "43694467359"
+      BUILD_SHA: "5ca8201562fdedc4d3525789075134e1ebedd91b"
+      RELEASE_TAG: v1.5.1-test
+    steps:
+      - name: Verify source build
+        run: |
+          gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN" > "$RUNNER_TEMP/build-run.json"
+          gh api "repos/$GH_REPO/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          run = json.loads((temp / "build-run.json").read_text())
+          assert run["status"] == "completed" and run["conclusion"] == "success"
+          assert run["head_sha"] == os.environ["BUILD_SHA"]
+          assert run["head_branch"] == "main"
+          assert run["head_repository"]["full_name"] == os.environ["GH_REPO"]
+          assert run["path"] == ".github/workflows/test-build.yml"
+          releases = json.loads((temp / "releases.json").read_text())
+          assert not any(r["tag_name"] == os.environ["RELEASE_TAG"] for r in releases), "Release already exists; inspect it before uploading."
+          print(f"Verified source build: {run['html_url']}")
+          PY
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BUILD_SHA }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ravi-test-apk
+          run-id: ${{ env.BUILD_RUN }}
+          github-token: ${{ github.token }}
+          path: artifact
+
+      - name: Validate APK and prepare release assets
+        run: |
+          python - <<'PY'
+          import hashlib
+          import os
+          import re
+          import shutil
+          import subprocess
+          import zipfile
+          from pathlib import Path
+
+          apks = list(Path("artifact").rglob("*.apk"))
+          assert len(apks) == 1, f"Expected one APK, found {len(apks)}"
+          apk = apks[0]
+          tools = Path(os.environ["ANDROID_HOME"]) / "build-tools"
+          versions = sorted((p for p in tools.iterdir() if re.fullmatch(r"\d+\.\d+\.\d+", p.name)), key=lambda p: tuple(map(int, p.name.split("."))))
+          build_tools = versions[-1]
+          badging = subprocess.check_output([str(build_tools / "aapt"), "dump", "badging", str(apk)], text=True)
+          assert re.search(r"package: name='com\.ravi\.ravi' versionCode='18' versionName='1\.5\.1'", badging), badging
+          assert "application-debuggable" in badging, "Expected a debug-signed test build"
+          print(badging)
+          subprocess.run([str(build_tools / "apksigner"), "verify", "--verbose", "--print-certs", str(apk)], check=True)
+          with zipfile.ZipFile(apk) as archive:
+              assert archive.testzip() is None, "APK integrity check failed"
+              names = set(archive.namelist())
+              for required in ["AndroidManifest.xml", "classes.dex", "lib/arm64-v8a/libflutter.so", "assets/flutter_assets/kernel_blob.bin"]:
+                  assert required in names, f"Missing APK component: {required}"
+              assert b"http://195.18.10.82:5000" in archive.read("assets/flutter_assets/kernel_blob.bin"), "Test backend URL is missing from the compiled app"
+              print("Native Flutter libraries:", sorted(n for n in names if n.endswith("/libflutter.so")))
+
+          compile(Path("backend/app.py").read_text(encoding="utf-8"), "backend/app.py", "exec")
+          assets = Path("release-assets")
+          assets.mkdir()
+          shutil.copy2(apk, assets / "ravi-v1.5.1-test.apk")
+          shutil.copy2("backend/app.py", assets / "app.py")
+          sources = [Path("backend/app.py"), Path("backend/requirements.txt"), Path("backend/README.md"), Path("LICENSE"), *sorted(Path("docs/icons").glob("*.svg"))]
+          with zipfile.ZipFile(assets / "ravi-backend-v1.5.1.zip", "w", zipfile.ZIP_DEFLATED) as bundle:
+              for source in sources:
+                  bundle.write(source, Path("ravi-backend-v1.5.1") / source)
+          checksums = []
+          for asset in sorted(assets.iterdir()):
+              digest = hashlib.file_digest(asset.open("rb"), "sha256").hexdigest()
+              checksums.append(f"{digest}  {asset.name}")
+              print(f"{asset.name}: {asset.stat().st_size} bytes; SHA-256 {digest}")
+          (assets / "SHA256SUMS.txt").write_text("\n".join(checksums) + "\n", encoding="utf-8")
+          PY
+
+      - name: Publish verified test release
+        run: |
+          cat > "$RUNNER_TEMP/release-notes.md" <<'EOF'
+          # RAVI v1.5.1 — Test APK and Backend
+
+          This is a debug-signed Android test build, not a production release.
+          The APK connects to **http://195.18.10.82:5000**. Use test accounts and non-sensitive data: this endpoint uses unencrypted HTTP.
+
+          ## Downloads
+
+          - `ravi-v1.5.1-test.apk`: RAVI Android app, package `com.ravi.ravi`, version `1.5.1` (18).
+          - `ravi-backend-v1.5.1.zip`: backend source, dependencies, English setup guide, SVG icons, and license.
+          - `app.py`: standalone backend source for an existing deployment.
+          - `SHA256SUMS.txt`: checksums for the three files above.
+
+          ## Included changes
+
+          - Client fixes for Saved Messages, reconnect/pending-message handling, forwarding, group/channel state, and disposed controllers.
+          - Backend fixes for private-chat unread counters, history field mappings, retry acknowledgements, private-message/forward blocking checks, and targeted block notifications.
+          - OpenRouter credentials read from `OPENROUTER_API_KEY` instead of being embedded in source.
+          - English-only READMEs with a local SVG icon set.
+
+          ## Backend quick start
+
+          Extract the backend ZIP, then run:
+
+          ```bash
+          cd ravi-backend-v1.5.1/backend
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install -r requirements.txt
+          python app.py
+          ```
+
+          On Windows, activate with `.venv\Scripts\activate` instead. The default port is `5000`.
+          Back up an existing database, uploads, and session secret before replacing a deployed backend.
+          Rotate any previously exposed OpenRouter key; removing it from the current code does not revoke it.
+
+          ## Validation and limitations
+
+          - Source commit: `5ca8201562fdedc4d3525789075134e1ebedd91b`.
+          - Backend syntax check and Flutter analysis completed; existing analyzer warnings remain.
+          - Release validation checks APK package/version, signature, ZIP integrity, ARM64 Flutter runtime, and the embedded test-server URL.
+          - The build workflow located the APK after Flutter reported an output-path lookup error; that build-tool issue remains unresolved.
+          - Device installation, live-server end-to-end behavior, and a production security audit have not been verified.
+          - An existing installation signed with another key cannot be updated with this debug APK; back up local data before uninstalling it or use a separate test device.
+          EOF
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --target "$BUILD_SHA" \
+            --title "RAVI v1.5.1 — Test APK + Backend" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --draft --prerelease --latest=false
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          gh release view "$RELEASE_TAG" --json url,isDraft,isPrerelease,assets
